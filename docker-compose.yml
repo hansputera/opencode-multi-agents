@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - LISTEN_ADDR=:8080
+      - UPSTREAM_BASE_URL=${UPSTREAM_BASE_URL:-https://openrouter.ai/api/v1}
+      - UPSTREAM_API_KEY=${UPSTREAM_API_KEY}
+      - PROXY_POOL_SIZE=${PROXY_POOL_SIZE:-3}
+      - PROXY_BASE_PORT=10801
+      - WARP_IMAGE=caomingjun/warp:latest
+      - RATE_LIMIT_COOLDOWN=${RATE_LIMIT_COOLDOWN:-5m}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=console
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      - warp1
+      - warp2
+      - warp3
+
+  warp1:
+    image: caomingjun/warp:latest
+    container_name: warp-gateway-10801
+    ports:
+      - "10801:1080"
+    environment:
+      - WARP_SLEEP=2
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+    labels:
+      - "warp-gateway=true"
+      - "warp-port=10801"
+
+  warp2:
+    image: caomingjun/warp:latest
+    container_name: warp-gateway-10802
+    ports:
+      - "10802:1080"
+    environment:
+      - WARP_SLEEP=2
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+    labels:
+      - "warp-gateway=true"
+      - "warp-port=10802"
+
+  warp3:
+    image: caomingjun/warp:latest
+    container_name: warp-gateway-10803
+    ports:
+      - "10803:1080"
+    environment:
+      - WARP_SLEEP=2
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+    labels:
+      - "warp-gateway=true"
+      - "warp-port=10803"
