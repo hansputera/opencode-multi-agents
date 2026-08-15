@@ -19,6 +19,23 @@ type Config struct {
 	// Upstream configuration
 	UpstreamBaseURL string `yaml:"upstream_base_url" env:"UPSTREAM_BASE_URL"`
 	UpstreamAPIKey  string `yaml:"upstream_api_key" env:"UPSTREAM_API_KEY"`
+	// UpstreamProvider selects the upstream driver: "zen" (default, OpenAI
+	// compatible) or "opencode" (OpenCode Server HTTP API). In "opencode" mode
+	// each request is proxied through a fresh WARP container so the agent's
+	// egress IP is unique per request.
+	UpstreamProvider string `yaml:"upstream_provider" env:"UPSTREAM_PROVIDER"`
+	// OpenCodeServerURL is the base URL of a running `opencode serve` instance
+	// (default http://127.0.0.1:4096). Tunnelled through each proxy container.
+	OpenCodeServerURL string `yaml:"opencode_server_url" env:"OPENCODE_SERVER_URL"`
+	// OpenCodeServerPassword, if set, authenticates to the OpenCode Server via
+	// HTTP basic auth (username "opencode" or OPENCODE_SERVER_USERNAME).
+	OpenCodeServerPassword string `yaml:"opencode_server_password" env:"OPENCODE_SERVER_PASSWORD"`
+	// OpenCodeProviderID / OpenCodeModel select the provider+model handed to
+	// OpenCode's /session/:id/message. If OpenCodeProviderID is empty, the
+	// gateway PUTs the client's bearer key to /auth/{providerID} derived from
+	// the Authorization header (e.g. "anthropic", "openai").
+	OpenCodeProviderID string `yaml:"opencode_provider_id" env:"OPENCODE_PROVIDER_ID"`
+	OpenCodeModel    string `yaml:"opencode_model" env:"OPENCODE_MODEL"`
 
 	// Proxy pool configuration
 	ProxyPoolSize      int           `yaml:"proxy_pool_size" env:"PROXY_POOL_SIZE"`
@@ -34,6 +51,19 @@ type Config struct {
 	RetryBaseDelay     time.Duration `yaml:"retry_base_delay" env:"RETRY_BASE_DELAY"`
 	RetryMaxDelay      time.Duration `yaml:"retry_max_delay" env:"RETRY_MAX_DELAY"`
 
+	// Retry-After (seconds) sent to clients when the upstream keeps rate
+	// limiting us across all retries
+	RateLimitRetryAfter string        `yaml:"rate_limit_retry_after" env:"RATE_LIMIT_RETRY_AFTER"`
+
+	// How long an egress IP stays banned after an upstream 429. During this
+	// window no request is routed through it and no new container may be
+	// assigned it. The upstream's Retry-After header (if present) extends it.
+	IPBanDuration time.Duration `yaml:"ip_ban_duration" env:"IP_BAN_DURATION"`
+
+	// How long the gateway waits for a fresh (unbanned) proxy on an upstream
+	// 429 before giving up with 429 + Retry-After. Covers WARP container boot.
+	RateLimitFreshIPWait time.Duration `yaml:"rate_limit_fresh_ip_wait" env:"RATE_LIMIT_FRESH_IP_WAIT"`
+
 	// Concurrency
 	MaxConcurrent      int `yaml:"max_concurrent" env:"MAX_CONCURRENT"`
 
@@ -46,28 +76,50 @@ type Config struct {
 
 	// Request timeout
 	RequestTimeout time.Duration `yaml:"request_timeout" env:"REQUEST_TIMEOUT"`
+
+	// Metrics
+	MetricsDBPath string `yaml:"metrics_db_path" env:"METRICS_DB_PATH"`
+
+	// Upstream API keys (comma-separated). When the client sends no
+	// Authorization header, the gateway picks a random key per request to
+	// spread quota/rate limits across multiple accounts. Entries may be:
+	//   - "public" / "public..."        → sent as "x-api-key: <value>"
+	//   - "zent-..."                    → sent as "Authorization: Bearer <value>"
+	//   - "header:value"                → sent as-is on that header
+	UpstreamAPIKeys []string `yaml:"upstream_api_keys"`
+
+	// Model list filter: only models whose name contains this substring are
+	// returned by /v1/models (case-insensitive). Empty string disables.
+	ModelFilter string `yaml:"model_filter" env:"MODEL_FILTER"`
 }
 
 // DefaultConfig returns configuration with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
-		ListenAddr:          ":8080",
-		UpstreamBaseURL:     "https://openrouter.ai/api",
+		ListenAddr:          ":8082",
+		UpstreamBaseURL:     "https://opencode.ai/zen/v1",
+		UpstreamProvider:    "zen",
+		OpenCodeServerURL:   "http://127.0.0.1:4096",
 		ProxyPoolSize:       3,
 		ProxyBasePort:       10801,
 		WARPImage:           "caomingjun/warp:latest",
 		CooldownDuration:    5 * time.Minute,
 		HealthCheckPeriod:   30 * time.Second,
 		ResourceCPULimit:    "0.25",
-		ResourceMemoryLimit: "64M",
+		ResourceMemoryLimit: "512M",
 		MaxRetries:          3,
 		RetryBaseDelay:      1 * time.Second,
 		RetryMaxDelay:       30 * time.Second,
+		RateLimitRetryAfter: "60",
+		IPBanDuration:       10 * time.Minute,
+		RateLimitFreshIPWait: 90 * time.Second,
 		MaxConcurrent:       100,
 		StickySessionTTL:    10 * time.Minute,
 		LogLevel:            "info",
 		LogFormat:           "json",
 		RequestTimeout:      60 * time.Second,
+		MetricsDBPath:       "data/metrics.db",
+		ModelFilter:         "-free",
 	}
 }
 
@@ -110,6 +162,28 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("UPSTREAM_API_KEY"); v != "" {
 		c.UpstreamAPIKey = v
+	}
+	if v := os.Getenv("UPSTREAM_PROVIDER"); v != "" {
+		c.UpstreamProvider = v
+	}
+	if v := os.Getenv("OPENCODE_SERVER_URL"); v != "" {
+		c.OpenCodeServerURL = v
+	}
+	if v := os.Getenv("OPENCODE_SERVER_PASSWORD"); v != "" {
+		c.OpenCodeServerPassword = v
+	}
+	if v := os.Getenv("OPENCODE_PROVIDER_ID"); v != "" {
+		c.OpenCodeProviderID = v
+	}
+	if v := os.Getenv("OPENCODE_MODEL"); v != "" {
+		c.OpenCodeModel = v
+	}
+	if v := os.Getenv("UPSTREAM_API_KEYS"); v != "" {
+		for _, k := range strings.Split(v, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				c.UpstreamAPIKeys = append(c.UpstreamAPIKeys, k)
+			}
+		}
 	}
 	if v := os.Getenv("PROXY_POOL_SIZE"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
@@ -175,6 +249,9 @@ func (c *Config) applyEnvOverrides() {
 		if d, err := time.ParseDuration(v); err == nil {
 			c.RequestTimeout = d
 		}
+	}
+	if v := os.Getenv("METRICS_DB_PATH"); v != "" {
+		c.MetricsDBPath = v
 	}
 }
 

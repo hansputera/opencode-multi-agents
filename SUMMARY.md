@@ -120,7 +120,7 @@ docker-compose up -d
 
 **Basic Request:**
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8082/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_KEY" \
   -d '{
@@ -131,7 +131,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 **Streaming:**
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8082/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_KEY" \
   -d '{
@@ -143,12 +143,12 @@ curl http://localhost:8080/v1/chat/completions \
 
 **Health Check:**
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8082/health
 ```
 
 **Pool Statistics:**
 ```bash
-curl http://localhost:8080/stats
+curl http://localhost:8082/stats
 ```
 
 ### 🎯 Design Goals Achieved
@@ -197,7 +197,7 @@ To complete the project:
 1. **Smart Rate Limit Detection**: Not just HTTP 429, but also keyword matching in response bodies
 2. **Sticky Sessions**: Same conversation uses same IP for consistency
 3. **Zero-Downtime Rotation**: New proxies created while old ones cool down
-4. **Resource Efficient**: Each WARP container limited to 0.25 CPU and 64MB RAM
+4. **Resource Efficient**: Each WARP container limited to 0.25 CPU and 512MB RAM
 5. **Comprehensive Observability**: Health, stats, and structured logging
 
 ---

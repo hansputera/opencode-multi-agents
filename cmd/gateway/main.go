@@ -12,6 +12,7 @@ import (
 	"github.com/hansputera/opencode-multi-agents/internal/config"
 	"github.com/hansputera/opencode-multi-agents/internal/handler"
 	"github.com/hansputera/opencode-multi-agents/internal/logger"
+	"github.com/hansputera/opencode-multi-agents/internal/metrics"
 	"github.com/hansputera/opencode-multi-agents/internal/proxy"
 )
 
@@ -42,8 +43,31 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to start proxy pool")
 	}
 
+	// Initialize metrics store
+	metricsStore, err := metrics.New(cfg.MetricsDBPath)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to initialize metrics store")
+	}
+	defer metricsStore.Close()
+
+	// Background metric pruning
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := metricsStore.Prune(); err != nil {
+					log.Debug().Err(err).Msg("Failed to prune metrics")
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// Create HTTP handler
-	h := handler.New(cfg, poolMgr, &log.Logger)
+	h := handler.New(cfg, poolMgr, metricsStore, &log.Logger)
 
 	// Create HTTP server
 	srv := &http.Server{

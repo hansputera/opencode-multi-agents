@@ -1,4 +1,4 @@
-.PHONY: build run test clean docker-build docker-up docker-down
+.PHONY: build run test clean docker-build docker-up docker-down check-ips
 
 # Build the gateway binary
 build:
@@ -31,26 +31,30 @@ docker-build:
 # Start with Docker Compose
 docker-up:
 	@echo "Starting services..."
-	@docker-compose up -d
-	@echo "Services started. Gateway available at http://localhost:8080"
+	@docker compose up -d --build
+	@echo "Services started. Gateway available at http://localhost:${GATEWAY_PORT:-8082}"
 
 # Stop Docker Compose
 docker-down:
 	@echo "Stopping services..."
-	@docker-compose down
+	@docker compose down
 	@echo "Services stopped"
 
 # View logs
 logs:
-	@docker-compose logs -f gateway
+	@docker compose logs -f gateway
 
 # Check health
 health:
-	@curl -s http://localhost:8080/health | jq
+	@curl -s http://localhost:${GATEWAY_PORT:-8082}/health | jq
 
 # Check stats
 stats:
-	@curl -s http://localhost:8080/stats | jq
+	@curl -s http://localhost:${GATEWAY_PORT:-8082}/stats | jq
+
+# Verify each WARP container egresses from a unique public IP
+check-ips:
+	@bash scripts/check-ips.sh
 
 # Format code
 fmt:

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Neo Gateway</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            cream: '#FFFDF2',
+            ink: '#1B1B1B',
+            yellow: '#FFD43B',
+            pink: '#FF90E8',
+            blue: '#4D96FF',
+            purple: '#C3A6FF',
+            green: '#B1F1CB',
+            red: '#FF6B6B',
+            orange: '#FFA24C',
+          },
+          fontFamily: {
+            display: ['"Space Grotesk"', 'system-ui', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="view"></div>
+  <script src="/app.js"></script>
+  <script src="/dashboard.js"></script>
+  <script src="/chat.js"></script>
+</body>
+</html>

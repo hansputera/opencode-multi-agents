@@ -12,6 +12,8 @@ Lightweight and performant API gateway that provides OpenAI-compatible endpoints
 - **Sticky Sessions**: Optional conversation-based session persistence
 - **Health Monitoring**: Background health checks for all proxies
 - **Resource Efficient**: Minimal memory footprint, fast startup
+- **Web Dashboard**: Neobrutalism-styled UI with live metrics, traffic chart, and model usage (SQLite-backed)
+- **Chat UI**: ChatGPT-like interface with SSE streaming and sticky-session conversations
 
 ## Quick Start
 
@@ -51,16 +53,25 @@ cp .env.example .env
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `LISTEN_ADDR` | Server listen address | `:8080` |
-| `UPSTREAM_BASE_URL` | Upstream API base URL | `https://openrouter.ai/api` |
-| `UPSTREAM_API_KEY` | Upstream API key | - |
+| `LISTEN_ADDR` | Server listen address | `:8082` |
+| `UPSTREAM_BASE_URL` | Upstream API base URL (OpenAI-compatible, `/v1` auto-appended if missing) | `https://opencode.ai/zen/v1` |
+| `UPSTREAM_API_KEY` | Upstream API key (OpenCode Zen: `zent-...`). Leave empty for the public tier — the gateway then authenticates with `x-api-key: public` | - |
+| `UPSTREAM_API_KEYS` | Comma-separated key list; a **random** key is picked per request (when the client sends no `Authorization`) to spread quota/rate limits across accounts. Entries: `public`, `zent-...`, or `header:value` | - |
+| `UPSTREAM_PROVIDER` | Upstream driver: `zen` (default, raw OpenAI-compatible) or `opencode` (drive an [OpenCode Server](https://opencode.ai/docs/server) via HTTP). In both cases each request egresses through a unique per-container WARP IP | `zen` |
+| `OPENCODE_SERVER_URL` | Base URL of `opencode serve` (used when `UPSTREAM_PROVIDER=opencode`). Must be reachable through the proxy container's SOCKS5 tunnel | `http://127.0.0.1:4096` |
+| `OPENCODE_SERVER_PASSWORD` | Optional `OPENCODE_SERVER_PASSWORD` for OpenCode Server basic auth (`opencode`-mode) | - |
+| `OPENCODE_PROVIDER_ID` | OpenCode provider used for `/session/:id/message` (e.g. `openai`, `anthropic`). If empty, a client `Authorization: Bearer <key>` is PUT to `/auth/<provider>` | - |
+| `OPENCODE_MODEL` | Model handed to OpenCode's `/session/:id/message` (e.g. `gpt-5.1-codex`) | - |
 | `PROXY_POOL_SIZE` | Number of WARP containers | `3` |
 | `PROXY_BASE_PORT` | Starting port for WARP containers | `10801` |
 | `WARP_IMAGE` | Docker image for WARP | `caomingjun/warp:latest` |
 | `RATE_LIMIT_COOLDOWN` | Cooldown duration after rate limit | `5m` |
+| `RATE_LIMIT_RETRY_AFTER` | `Retry-After` seconds returned to clients when upstream keeps rate limiting across all retries (responds `429` instead of `502`) | `60` |
+| `IP_BAN_DURATION` | How long a rate-limited egress IP is kept out of rotation (no request routed through it; no new container may reuse it). Extended automatically by the upstream's `Retry-After` header when present | `10m` |
+| `RATE_LIMIT_FRESH_IP_WAIT` | Per-request max wait for a fresh, unbanned proxy to boot after all pool IPs are rate limited (covers a WARP container startup); only if this expires is `429` returned | `90s` |
 | `HEALTH_CHECK_PERIOD` | Health check interval | `30s` |
 | `RESOURCE_CPU_LIMIT` | CPU limit per container | `0.25` |
-| `RESOURCE_MEMORY_LIMIT` | Memory limit per container | `64M` |
+| `RESOURCE_MEMORY_LIMIT` | Memory limit per container | `512M` (below ~256M causes WARP OOM-kill, exit 137) |
 | `MAX_RETRIES` | Maximum retry attempts | `3` |
 | `RETRY_BASE_DELAY` | Base delay for exponential backoff | `1s` |
 | `RETRY_MAX_DELAY` | Maximum delay between retries | `30s` |
@@ -69,20 +80,29 @@ cp .env.example .env
 | `LOG_LEVEL` | Log level (debug, info, warn, error) | `info` |
 | `LOG_FORMAT` | Log format (json, console) | `json` |
 | `REQUEST_TIMEOUT` | Request timeout | `60s` |
+| `METRICS_DB_PATH` | SQLite database path for request metrics | `data/metrics.db` |
+| `MODEL_FILTER` | Keep only models whose name contains this substring in `/v1/models` (case-insensitive; empty disables) | `-free` |
 
 ### Configuration File
 
 You can also use a YAML configuration file by setting `CONFIG_FILE` environment variable:
 
 ```yaml
-listen_addr: ":8080"
-upstream_base_url: "https://openrouter.ai/api"
-upstream_api_key: "your-api-key"
+listen_addr: ":8082"
+upstream_base_url: "https://opencode.ai/zen/v1"
+upstream_api_key: "zent-your-api-key"
 proxy_pool_size: 5
 rate_limit_cooldown: "5m"
 log_level: "info"
 log_format: "console"
 ```
+
+## Web UI
+
+Open `http://localhost:8082` in your browser:
+
+- **Dashboard** (`#/dashboard`): live metrics — total requests, success rate, avg latency, errors, uptime, per-minute traffic chart, per-model usage counts, and proxy pool status with each container's egress IP (duplicate IPs flagged). Auto-refreshes every 5 seconds.
+- **Chat** (`#/chat`): a ChatGPT-like interface with model selection, SSE streaming responses, and per-conversation sticky sessions (`conversation_id` handled automatically).
 
 ## API Endpoints
 
@@ -96,11 +116,11 @@ Compatible with OpenAI's chat completion API.
 
 **Example (non-streaming):**
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8082/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
-    "model": "meta-llama/llama-3.1-8b-instruct:free",
+    "model": "deepseek-v4-flash",
     "messages": [
       {"role": "user", "content": "Hello, how are you?"}
     ]
@@ -109,11 +129,11 @@ curl http://localhost:8080/v1/chat/completions \
 
 **Example (streaming):**
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8082/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
-    "model": "meta-llama/llama-3.1-8b-instruct:free",
+    "model": "deepseek-v4-flash",
     "messages": [
       {"role": "user", "content": "Write a short poem"}
     ],
@@ -127,7 +147,7 @@ To enable sticky sessions (same conversation uses same IP), add a `conversation_
 
 ```json
 {
-  "model": "meta-llama/llama-3.1-8b-instruct:free",
+  "model": "deepseek-v4-flash",
   "messages": [...],
   "conversation_id": "unique-conversation-id"
 }
@@ -139,11 +159,13 @@ To enable sticky sessions (same conversation uses same IP), add a `conversation_
 GET /v1/models
 ```
 
-Returns a list of available models.
+Returns the model list from the configured upstream (proxied through the pool), so the chat UI always shows the real, current models from your provider. By default only models with `-free` in the name are returned — configure with `MODEL_FILTER` (e.g. `MODEL_FILTER=` to disable, or `MODEL_FILTER=zen` to match differently).
 
 ```bash
-curl http://localhost:8080/v1/models
+curl http://localhost:8082/v1/models
 ```
+
+> Switching providers is a one-line change: set `UPSTREAM_BASE_URL=https://opencode.ai/zen/go/v1` for the cheaper Zen Go tier. The gateway auto-appends `/v1` when the base URL doesn't include it, so both styles work.
 
 ### Health Check
 
@@ -154,30 +176,91 @@ GET /health
 Returns health status of the gateway and proxy pool.
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8082/health
 ```
 
 ### Pool Statistics
 
 ```bash
-GET /stats
+curl http://localhost:8082/stats
 ```
 
 Returns statistics about the proxy pool.
 
+### Metrics
+
 ```bash
-curl http://localhost:8080/stats
+curl http://localhost:8082/api/metrics
+```
+
+Returns the dashboard payload: aggregated totals (requests, errors, success rate, avg latency, uptime), per-minute traffic series, per-model usage counts, pool statistics, and per-proxy details. Persisted in SQLite (see `METRICS_DB_PATH`).
+
+```bash
+curl http://localhost:8082
+```
+
+Serves the embedded web UI (dashboard + chat).
+
+```bash
+curl http://localhost:8082/stats
 ```
 
 ## Docker Compose Deployment
 
 ```bash
-docker-compose up -d
+# Pull the WARP image first (the gateway creates containers from it at runtime)
+docker pull caomingjun/warp:latest
+docker compose up -d --build
 ```
 
-This will start:
-- The API gateway
-- 3 Cloudflare WARP containers (configurable)
+This will start the API gateway. The gateway manages its own Cloudflare WARP containers at runtime through the Docker socket (`PROXY_POOL_SIZE` of them), so only the gateway service is defined in the compose file.
+
+Notes:
+
+- **Custom port**: set `GATEWAY_PORT` in your `.env` (or inline) to change the host port, e.g. `GATEWAY_PORT=9090 docker compose up -d`. The gateway uses host networking so the UI + API are served directly on that port.
+- The compose file auto-loads `.env` for all `UPSTREAM_*`, `PROXY_*`, `RESOURCE_*`, `LOG_*`, etc. variables (see `.env.example`).
+- Metrics persist in a named Docker volume (`gateway-data`) mounted at `/app/data`.
+- A healthcheck validates `/api/metrics`; view status with `docker compose ps`.
+
+```bash
+# Example: run on a custom port with more proxies
+GATEWAY_PORT=9090 PROXY_POOL_SIZE=5 UPSTREAM_API_KEY=sk-... docker compose up -d --build
+```
+
+## Agent Mode (OpenCode Server)
+
+Set `UPSTREAM_PROVIDER=opencode` to route requests through an [OpenCode Server](https://opencode.ai/docs/server) (`opencode serve`) instead of Zen. The gateway translates each OpenAI-compatible `/v1/chat/completions` call into OpenCode's `POST /session` → `POST /session/:id/message` flow (see `internal/upstream/opencode_client.go`), and still hands the request to **a fresh per-container WARP proxy** — so the agent's network egress comes from a unique IP on every request (and is rotated/banned automatically on 429s, like the Zen path).
+
+- **Auth**: if `OPENCODE_SERVER_PASSWORD` is set, the gateway authenticates to the server with HTTP basic auth. Otherwise it PUTs the caller's `Authorization: Bearer <key>` to `/auth/<OPENCODE_PROVIDER_ID>` (or uses the configured provider id) before messaging.
+- **Streaming**: when `stream:true`, the assistant text is relayed as OpenAI `data:` SSE chunks (one per word) with `data: [DONE]`; non-streaming returns a single OpenAI `chat.completion`.
+- **Sessions**: one OpenCode session is created per request. Multi-message continuity within a single conversation is a follow-up (sticky session ids would key a persistent session).
+
+```bash
+# Run your own OpenCode Server, then have the gateway egress through WARP
+opencode serve --port 4121 --hostname 0.0.0.0 &
+UPSTREAM_PROVIDER=opencode OPENCODE_SERVER_URL=http://<reachable-host>:4121 \
+  OPENCODE_PROVIDER_ID=openai OPENCODE_MODEL=gpt-5.1-codex \
+  docker compose up -d --build
+```
+
+## IP Rotation & Verification
+
+Every WARP container is created fresh (no persisted warp data, no license key), so on first boot it runs `warp-cli registration new` — a brand new free Cloudflare WARP account — and egresses from **its own unique public IP**. The gateway enforces this as an invariant: after each container becomes ready it compares the detected egress IP against the rest of the pool and **recreates the container if a duplicate is found** (rides the existing 3-attempt retry).
+
+Check that all containers have distinct public IPs:
+
+```bash
+make check-ips
+# or: PROXY_BASE_PORT=10801 PROXY_POOL_SIZE=3 bash scripts/check-ips.sh
+# port 10801: ip=2a09:bac5:... ip4=2a09:bac5:... warp=on
+# port 10802: ip=2a09:bac5:... ip4=2a09:bac5:... warp=on
+# ...
+# OK: all 3 proxies egress from unique public IPs
+```
+
+The script probes `cloudflare.com/cdn-cgi/trace` (plus an IPv4 view via `ifconfig.me/ip`) through each container's SOCKS5 port and exits non-zero on any duplicate or unreachable container. The dashboard also shows each proxy's current egress IP (refreshed on the health-check cycle) and flags duplicates with a **duplicate ip** badge.
+
+> **Never** set `WARP_LICENSE_KEY` or mount the WARP data directory (`/var/lib/cloudflare-warp`) — a shared license/account makes every container use the same IP and defeats rotation. What you see on the proxy cards is WARP's IPv6 egress; IPv4-only destinations are reached via Cloudflare's NAT64 and map to the same unique per-container address.
 
 ## Architecture
 
@@ -200,11 +283,14 @@ Client → API Gateway → Proxy Pool → WARP Containers → Upstream Provider
 
 ### Rate Limit Handling
 
-When a rate limit is detected:
-1. The current proxy is marked as "cooldown"
-2. A new proxy is acquired from the pool
-3. The request is retried with exponential backoff
-4. After cooldown period, the proxy returns to active pool
+When the upstream returns a rate-limit response (HTTP 429 or a rate-limit error body, including when its `Retry-After` header is honored):
+
+1. The egress IP of the responsible proxy is **banned** for `max(IP_BAN_DURATION, upstream Retry-After)` — no request is routed through it and no new container may reuse it (WARP recycles IPs, so this prevents a replacement from inheriting the throttled address).
+2. The proxy is moved to *cooldown*; a **replacement container with a fresh egress IP** is spun up asynchronously (its IP must not be banned or duplicated by any member of the pool).
+3. The gateway waits **up to `RATE_LIMIT_FRESH_IP_WAIT`** for that fresh proxy to boot (WARPS start in ~40–90s). If one appears, the request succeeds through the new IP instead of erroring.
+4. Only if no unbanned proxy materializes in time does the gateway answer honestly: `429 Too Many Requests` with `Retry-After` (from `RATE_LIMIT_RETRY_AFTER`) — never a misleading `502`.
+
+This rotates IPs on per-IP limits. If the throttle is **account/key-based** (e.g. Zen's shared `public` tier), IP rotation cannot dodge it — use `UPSTREAM_API_KEYS` to spread quota across multiple accounts.
 
 ## Development
 
@@ -255,17 +341,16 @@ REQUEST_TIMEOUT=30s
 
 ```bash
 PROXY_POOL_SIZE=2
-RESOURCE_MEMORY_LIMIT=32M
+RESOURCE_MEMORY_LIMIT=256M
 MAX_CONCURRENT=50
 ```
 
+> `RESOURCE_MEMORY_LIMIT` below ~256M causes the WARP container to be OOM-killed (exit 137).
+
 ## Supported Upstream Providers
 
-- OpenRouter (free models)
-- Groq
-- Together AI
-- Fireworks AI
-- SambaNova
+- **OpenCode Zen** — `https://opencode.ai/zen/v1` (default; API key `zent-...` from https://opencode.ai/zen)
+- **OpenCode Zen Go** — `https://opencode.ai/zen/go/v1` (cheaper tier, fewer models)
 - Any OpenAI-compatible API endpoint
 
 ## Troubleshooting
@@ -305,4 +390,4 @@ Contributions are welcome! Please open an issue or submit a pull request.
 ## Acknowledgments
 
 - [caomingjun/warp](https://hub.docker.com/r/caomingjun/warp) - Cloudflare WARP Docker image
-- OpenRouter, Groq, and other free model providers
+- OpenCode Zen - OpenAI-compatible API used as the default upstream

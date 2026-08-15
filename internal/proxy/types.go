@@ -27,6 +27,7 @@ type Proxy struct {
 	RequestsSent int          `json:"requests_sent"`
 	ErrorCount   int          `json:"error_count"`
 	CreatedAt    time.Time    `json:"created_at"`
+	EgressIP     string       `json:"egress_ip"`
 }
 
 // IsHealthy returns true if the proxy is in a healthy state

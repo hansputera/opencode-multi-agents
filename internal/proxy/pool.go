@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,6 +26,10 @@ type PoolManager struct {
 	pool   map[string]*Proxy
 	sticky map[string]string // conversation_id -> proxy_id
 
+	// ipBans maps egress IPs to the time until which they are excluded from
+	// selection (upstream rate limited them). Guarded by mu.
+	ipBans map[string]time.Time
+
 	// Signals
 	available chan struct{}
 	done      chan struct{}
@@ -40,16 +45,21 @@ func NewPoolManager(cfg *config.Config, log *zerolog.Logger) (*PoolManager, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker manager: %w", err)
 	}
+	return NewPoolManagerWithManager(mgr, cfg, log), nil
+}
 
+// NewPoolManagerWithManager creates a proxy pool manager with a custom manager
+func NewPoolManagerWithManager(mgr Manager, cfg *config.Config, log *zerolog.Logger) *PoolManager {
 	return &PoolManager{
 		cfg:       cfg,
 		log:       log,
 		mgr:       mgr,
 		pool:      make(map[string]*Proxy),
 		sticky:    make(map[string]string),
+		ipBans:    make(map[string]time.Time),
 		available: make(chan struct{}, cfg.ProxyPoolSize),
 		done:      make(chan struct{}),
-	}, nil
+	}
 }
 
 // Start initializes the proxy pool with the configured number of proxies
@@ -74,29 +84,103 @@ func (pm *PoolManager) Start(ctx context.Context) error {
 	return nil
 }
 
-// createProxy creates a new proxy container and adds it to the pool
+// createProxy creates a new proxy container and adds it to the pool, retrying
+// transient failures (e.g. slow WARP first-boot) with a short backoff.
 func (pm *PoolManager) createProxy(ctx context.Context) error {
-	proxy, err := pm.mgr.Create(ctx)
-	if err != nil {
-		return err
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			delay := time.Duration(attempt) * 10 * time.Second
+			pm.log.Warn().Int("attempt", attempt).Dur("delay", delay).Msg("Retrying proxy creation")
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		proxy, err := pm.mgr.Create(ctx)
+		if err != nil {
+			lastErr = err
+			pm.log.Error().Err(err).Int("attempt", attempt).Msg("Proxy creation failed")
+			continue
+		}
+
+		// Enforce unique egress IPs: every proxy must egress from a public IP
+		// that no other proxy in the pool already uses, and never one that is
+		// currently banned (upstream rate limited). Otherwise a replacement
+		// would inherit the exact IP we are trying to rotate away from.
+		if proxy.EgressIP != "" && (pm.poolHasIP(proxy.ID, proxy.EgressIP) || pm.ipBanned(proxy.EgressIP)) {
+			pm.log.Warn().
+				Str("id", proxy.ID).
+				Str("ip", proxy.EgressIP).
+				Msg("Duplicate egress IP detected, recreating proxy")
+			if err := pm.mgr.Remove(ctx, proxy.ContainerID); err != nil {
+				pm.log.Error().Err(err).Str("container_id", proxy.ContainerID).Msg("Failed to remove duplicate container")
+			}
+			lastErr = fmt.Errorf("duplicate egress IP %s", proxy.EgressIP)
+			continue
+		}
+
+		pm.mu.Lock()
+		pm.pool[proxy.ID] = proxy
+		pm.mu.Unlock()
+
+		pm.log.Info().
+			Str("id", proxy.ID).
+			Str("socks5", proxy.SOCKS5Addr).
+			Msg("Created new proxy container")
+
+		// Signal availability
+		select {
+		case pm.available <- struct{}{}:
+		default:
+		}
+
+		return nil
 	}
 
-	pm.mu.Lock()
-	pm.pool[proxy.ID] = proxy
-	pm.mu.Unlock()
+	return fmt.Errorf("proxy creation failed after %d attempts: %w", maxAttempts, lastErr)
+}
 
-	pm.log.Info().
-		Str("id", proxy.ID).
-		Str("socks5", proxy.SOCKS5Addr).
-		Msg("Created new proxy container")
-
-	// Signal availability
-	select {
-	case pm.available <- struct{}{}:
-	default:
+// ipBannedLocked reports whether the egress IP is currently banned.
+// Callers must hold pm.mu (read or write).
+func (pm *PoolManager) ipBannedLocked(ip string, now time.Time) bool {
+	if ip == "" {
+		return false
 	}
+	until, ok := pm.ipBans[ip]
+	if !ok {
+		return false
+	}
+	if now.Before(until) {
+		return true
+	}
+	delete(pm.ipBans, ip)
+	return false
+}
 
-	return nil
+// ipBanned reports whether the egress IP is currently banned.
+func (pm *PoolManager) ipBanned(ip string) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.ipBannedLocked(ip, time.Now())
+}
+
+// poolHasIP reports whether any proxy in the pool (other than the one
+// with ID proxyID) already egresses from the given IP. All states are
+// considered: a cooldown/unhealthy container still occupies its IP, and a
+// replacement must not be assigned it.
+func (pm *PoolManager) poolHasIP(proxyID, ip string) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	for id, other := range pm.pool {
+		if id != proxyID && other.EgressIP == ip {
+			return true
+		}
+	}
+	return false
 }
 
 // GetProxy returns an available proxy, blocking if none available
@@ -107,7 +191,8 @@ func (pm *PoolManager) GetProxy(ctx context.Context, conversationID string) (*Pr
 		proxyID, ok := pm.sticky[conversationID]
 		if ok {
 			proxy, exists := pm.pool[proxyID]
-			if exists && proxy.IsHealthy() {
+			now := time.Now()
+			if exists && proxy.IsHealthy() && !pm.ipBannedLocked(proxy.EgressIP, now) {
 				pm.mu.RUnlock()
 				return proxy, nil
 			}
@@ -118,8 +203,9 @@ func (pm *PoolManager) GetProxy(ctx context.Context, conversationID string) (*Pr
 	// Wait for available proxy
 	for {
 		pm.mu.RLock()
+		now := time.Now()
 		for _, proxy := range pm.pool {
-			if proxy.IsAvailable() {
+			if proxy.IsAvailable() && !pm.ipBannedLocked(proxy.EgressIP, now) {
 				proxy.State = StateActive
 				proxy.LastUsed = time.Now()
 				proxy.RequestsSent++
@@ -169,11 +255,21 @@ func (pm *PoolManager) ReleaseProxy(proxy *Proxy) {
 	}
 }
 
-// MarkRateLimited marks a proxy as rate limited and moves it to cooldown
-func (pm *PoolManager) MarkRateLimited(proxy *Proxy) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+// MarkRateLimited marks a proxy as rate limited: its egress IP is banned for
+// max(IPBanDuration, RetryAfter) so no request is routed through it, the proxy
+// itself is moved to cooldown, and a replacement container is spun up.
+func (pm *PoolManager) MarkRateLimited(proxy *Proxy, retryAfter string) {
+	banFor := pm.cfg.IPBanDuration
+	if retryAfter != "" {
+		if secs, err := strconv.Atoi(retryAfter); err == nil && secs > 0 {
+			if d := time.Duration(secs) * time.Second; d > banFor {
+				banFor = d
+			}
+		}
+	}
 
+	pm.mu.Lock()
+	pm.banIPLocked(proxy.EgressIP, time.Now().Add(banFor))
 	if pr, exists := pm.pool[proxy.ID]; exists {
 		pr.State = StateCooldown
 		pr.LastUsed = time.Now()
@@ -182,29 +278,52 @@ func (pm *PoolManager) MarkRateLimited(proxy *Proxy) {
 
 		pm.log.Warn().
 			Str("proxy_id", pr.ID).
+			Str("ip", pr.EgressIP).
 			Dur("cooldown", pm.cfg.CooldownDuration).
-			Msg("Proxy rate limited, moving to cooldown")
+			Dur("ip_ban", banFor).
+			Msg("Proxy rate limited, moving to cooldown and banning egress IP")
 	}
 
-	// Try to create a new proxy if needed
+	// Signals
+	select {
+	case pm.available <- struct{}{}:
+	default:
+	}
+	pm.mu.Unlock()
+
+	// Try to spin up a replacement with a fresh, unbanned egress IP.
 	go func() {
 		pm.mu.RLock()
-		active := 0
+		usable := 0
 		for _, pr := range pm.pool {
-			if pr.IsHealthy() {
-				active++
+			if pr.IsHealthy() && !pm.ipBannedLocked(pr.EgressIP, time.Now()) {
+				usable++
 			}
 		}
+		total := len(pm.pool)
 		pm.mu.RUnlock()
 
-		if active < pm.cfg.ProxyPoolSize {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := pm.createProxy(ctx); err != nil {
-				pm.log.Error().Err(err).Msg("Failed to create replacement proxy")
-			}
+		if usable >= pm.cfg.ProxyPoolSize || total >= pm.cfg.ProxyPoolSize*2 {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), pm.cfg.RateLimitFreshIPWait+time.Minute)
+		defer cancel()
+		if err := pm.createProxy(ctx); err != nil {
+			pm.log.Error().Err(err).Msg("Failed to create replacement proxy after rate limit")
 		}
 	}()
+}
+
+// banIPLocked records that an egress IP is rate limited until the given time.
+// Callers must hold pm.mu.
+func (pm *PoolManager) banIPLocked(ip string, until time.Time) {
+	if ip == "" {
+		return
+	}
+	if until.After(pm.ipBans[ip]) {
+		pm.ipBans[ip] = until
+	}
 }
 
 // MarkUnhealthy marks a proxy as unhealthy
@@ -225,12 +344,12 @@ func (pm *PoolManager) MarkUnhealthy(proxy *Proxy) {
 }
 
 // RemoveProxy removes a proxy from the pool
-func (pm *PoolManager) RemoveProxy(ctx context.Context, proxyID string) {
+func (pm *PoolManager) RemoveProxy(ctx context.Context, proxyID string) error {
 	pm.mu.Lock()
 	proxy, exists := pm.pool[proxyID]
 	if !exists {
 		pm.mu.Unlock()
-		return
+		return nil
 	}
 	delete(pm.pool, proxyID)
 	pm.mu.Unlock()
@@ -238,9 +357,11 @@ func (pm *PoolManager) RemoveProxy(ctx context.Context, proxyID string) {
 	// Remove container
 	if err := pm.mgr.Remove(ctx, proxy.ContainerID); err != nil {
 		pm.log.Error().Err(err).Str("container_id", proxy.ContainerID).Msg("Failed to remove container")
+		return err
 	}
 
 	pm.log.Info().Str("proxy_id", proxyID).Msg("Removed proxy")
+	return nil
 }
 
 // Stats returns current pool statistics
@@ -268,6 +389,18 @@ func (pm *PoolManager) Stats() PoolStats {
 	}
 
 	return stats
+}
+
+// List returns a snapshot of all proxies in the pool
+func (pm *PoolManager) List() []*Proxy {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	proxies := make([]*Proxy, 0, len(pm.pool))
+	for _, proxy := range pm.pool {
+		proxies = append(proxies, proxy)
+	}
+	return proxies
 }
 
 // healthCheckLoop periodically checks proxy health
@@ -339,26 +472,58 @@ func (pm *PoolManager) cooldownLoop(ctx context.Context) {
 	}
 }
 
-// restoreCooldownProxies moves expired cooldown proxies back to idle
+// restoreCooldownProxies moves expired cooldown proxies back to idle, prunes
+// excess containers that were spawned during rate-limit rotation, and clears
+// stale IP bans.
 func (pm *PoolManager) restoreCooldownProxies() {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
 	now := time.Now()
-	for _, proxy := range pm.pool {
-		if proxy.State == StateCooldown {
-			if now.Sub(proxy.LastUsed) >= pm.cfg.CooldownDuration {
-				proxy.State = StateIdle
-				proxy.ErrorCount = 0
-				pm.log.Info().Str("proxy_id", proxy.ID).Msg("Proxy restored from cooldown")
+	var toRemove []string
 
-				// Signal availability
-				select {
-				case pm.available <- struct{}{}:
-				default:
-				}
+	for _, proxy := range pm.pool {
+		// Clear expired IP bans.
+		if proxy.EgressIP != "" {
+			if until, ok := pm.ipBans[proxy.EgressIP]; ok && !now.Before(until) {
+				delete(pm.ipBans, proxy.EgressIP)
 			}
 		}
+
+		if proxy.State != StateCooldown {
+			continue
+		}
+		if now.Sub(proxy.LastUsed) < pm.cfg.CooldownDuration {
+			continue
+		}
+
+		// Keep the pool at its configured size: if we spawned a replacement
+		// during rate-limit rotation and no longer need this container, drop
+		// it outright instead of returning it to idle.
+		if len(pm.pool) > pm.cfg.ProxyPoolSize {
+			toRemove = append(toRemove, proxy.ID)
+			continue
+		}
+
+		proxy.State = StateIdle
+		proxy.ErrorCount = 0
+		pm.log.Info().Str("proxy_id", proxy.ID).Msg("Proxy restored from cooldown")
+
+		// Only signal availability if the proxy is actually usable now; a
+		// banned IP must not wake waiters who'd just re-block on it.
+		if !pm.ipBannedLocked(proxy.EgressIP, now) {
+			select {
+			case pm.available <- struct{}{}:
+			default:
+			}
+		}
+	}
+	pm.mu.Unlock()
+
+	for _, id := range toRemove {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := pm.RemoveProxy(ctx, id); err != nil {
+			pm.log.Error().Err(err).Str("proxy_id", id).Msg("Failed to prune excess proxy")
+		}
+		cancel()
 	}
 }
 

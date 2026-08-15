@@ -1,76 +1,50 @@
-version: '3.8'
-
 services:
   gateway:
     build: .
-    ports:
-      - "8080:8080"
+    # Host networking is required: the gateway creates WARP containers that
+    # publish SOCKS5 ports on the host loopback (127.0.0.1:<port>).
+    network_mode: host
     environment:
-      - LISTEN_ADDR=:8080
-      - UPSTREAM_BASE_URL=${UPSTREAM_BASE_URL:-https://openrouter.ai/api/v1}
+      - LISTEN_ADDR=:${GATEWAY_PORT:-8082}
+      - UPSTREAM_BASE_URL=${UPSTREAM_BASE_URL:-https://opencode.ai/zen/v1}
       - UPSTREAM_API_KEY=${UPSTREAM_API_KEY}
+      - UPSTREAM_API_KEYS=${UPSTREAM_API_KEYS}
+      - UPSTREAM_PROVIDER=${UPSTREAM_PROVIDER:-zen}
+      - OPENCODE_SERVER_URL=${OPENCODE_SERVER_URL:-http://127.0.0.1:4096}
+      - OPENCODE_SERVER_PASSWORD=${OPENCODE_SERVER_PASSWORD}
+      - OPENCODE_PROVIDER_ID=${OPENCODE_PROVIDER_ID}
+      - OPENCODE_MODEL=${OPENCODE_MODEL}
       - PROXY_POOL_SIZE=${PROXY_POOL_SIZE:-3}
-      - PROXY_BASE_PORT=10801
-      - WARP_IMAGE=caomingjun/warp:latest
+      - PROXY_BASE_PORT=${PROXY_BASE_PORT:-10801}
+      - WARP_IMAGE=${WARP_IMAGE:-caomingjun/warp:latest}
       - RATE_LIMIT_COOLDOWN=${RATE_LIMIT_COOLDOWN:-5m}
+      - RATE_LIMIT_RETRY_AFTER=${RATE_LIMIT_RETRY_AFTER:-60}
+      - IP_BAN_DURATION=${IP_BAN_DURATION:-10m}
+      - RATE_LIMIT_FRESH_IP_WAIT=${RATE_LIMIT_FRESH_IP_WAIT:-90s}
+      - HEALTH_CHECK_PERIOD=${HEALTH_CHECK_PERIOD:-30s}
+      - RESOURCE_CPU_LIMIT=${RESOURCE_CPU_LIMIT:-0.25}
+      - RESOURCE_MEMORY_LIMIT=${RESOURCE_MEMORY_LIMIT:-512M}
       - MAX_RETRIES=${MAX_RETRIES:-3}
+      - RETRY_BASE_DELAY=${RETRY_BASE_DELAY:-1s}
+      - RETRY_MAX_DELAY=${RETRY_MAX_DELAY:-30s}
+      - MAX_CONCURRENT=${MAX_CONCURRENT:-100}
+      - STICKY_SESSION_TTL=${STICKY_SESSION_TTL:-10m}
       - LOG_LEVEL=${LOG_LEVEL:-info}
-      - LOG_FORMAT=console
+      - LOG_FORMAT=${LOG_FORMAT:-console}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-60s}
+      - METRICS_DB_PATH=/app/data/metrics.db
+      - MODEL_FILTER=${MODEL_FILTER:--free}
+      - GATEWAY_PORT=${GATEWAY_PORT:-8082}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - gateway-data:/app/data
     restart: unless-stopped
-    depends_on:
-      - warp1
-      - warp2
-      - warp3
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${GATEWAY_PORT:-8082}/api/metrics > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  warp1:
-    image: caomingjun/warp:latest
-    container_name: warp-gateway-10801
-    ports:
-      - "10801:1080"
-    environment:
-      - WARP_SLEEP=2
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv4.conf.all.src_valid_mark=1
-    restart: unless-stopped
-    labels:
-      - "warp-gateway=true"
-      - "warp-port=10801"
-
-  warp2:
-    image: caomingjun/warp:latest
-    container_name: warp-gateway-10802
-    ports:
-      - "10802:1080"
-    environment:
-      - WARP_SLEEP=2
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv4.conf.all.src_valid_mark=1
-    restart: unless-stopped
-    labels:
-      - "warp-gateway=true"
-      - "warp-port=10802"
-
-  warp3:
-    image: caomingjun/warp:latest
-    container_name: warp-gateway-10803
-    ports:
-      - "10803:1080"
-    environment:
-      - WARP_SLEEP=2
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv4.conf.all.src_valid_mark=1
-    restart: unless-stopped
-    labels:
-      - "warp-gateway=true"
-      - "warp-port=10803"
+volumes:
+  gateway-data:

@@ -35,5 +35,11 @@ Thumbs.db
 # Logs
 *.log
 
+# Metrics database
+data/
+*.db
+*.db-wal
+*.db-shm
+
 # Docker
 docker-compose.override.yml

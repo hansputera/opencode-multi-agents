@@ -9,8 +9,8 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.ListenAddr != ":8080" {
-		t.Errorf("Expected ListenAddr :8080, got %s", cfg.ListenAddr)
+	if cfg.ListenAddr != ":8082" {
+		t.Errorf("Expected ListenAddr :8082, got %s", cfg.ListenAddr)
 	}
 
 	if cfg.ProxyPoolSize != 3 {

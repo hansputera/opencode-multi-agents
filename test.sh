@@ -4,7 +4,7 @@
 
 set -e
 
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:8080}"
+GATEWAY_URL="${GATEWAY_URL:-http://localhost:8082}"
 API_KEY="${UPSTREAM_API_KEY:-your-api-key-here}"
 
 echo "==================================="

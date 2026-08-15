@@ -2,36 +2,49 @@ package handler
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/hansputera/opencode-multi-agents/internal/config"
+	"github.com/hansputera/opencode-multi-agents/internal/metrics"
 	"github.com/hansputera/opencode-multi-agents/internal/proxy"
 	"github.com/hansputera/opencode-multi-agents/internal/upstream"
+	"github.com/hansputera/opencode-multi-agents/internal/web"
 	"github.com/rs/zerolog"
 )
 
 // Handler handles HTTP requests for the OpenAI-compatible API
 type Handler struct {
-	cfg      *config.Config
-	pool     *proxy.PoolManager
-	client   *upstream.Client
-	log      *zerolog.Logger
-	mux      *http.ServeMux
+	cfg     *config.Config
+	pool    *proxy.PoolManager
+	client  upstream.Upstream
+	metrics *metrics.Store
+	log     *zerolog.Logger
+	mux     *http.ServeMux
 }
 
 // New creates a new HTTP handler
-func New(cfg *config.Config, pool *proxy.PoolManager, log *zerolog.Logger) http.Handler {
+func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Store, log *zerolog.Logger) http.Handler {
+	var client upstream.Upstream
+	switch cfg.UpstreamProvider {
+	case "opencode":
+		client = upstream.NewOpenCodeClient(cfg, log)
+	default:
+		client = upstream.NewClient(cfg, log)
+	}
 	h := &Handler{
-		cfg:    cfg,
-		pool:   pool,
-		client: upstream.NewClient(cfg, log),
-		log:    log,
-		mux:    http.NewServeMux(),
+		cfg:     cfg,
+		pool:    pool,
+		client:  client,
+		metrics: metricsStore,
+		log:     log,
+		mux:     http.NewServeMux(),
 	}
 
 	// Register routes
@@ -39,6 +52,10 @@ func New(cfg *config.Config, pool *proxy.PoolManager, log *zerolog.Logger) http.
 	h.mux.HandleFunc("POST /v1/chat/completions", h.handleChatCompletions)
 	h.mux.HandleFunc("GET /health", h.handleHealth)
 	h.mux.HandleFunc("GET /stats", h.handleStats)
+	h.mux.HandleFunc("GET /api/metrics", h.handleMetrics)
+
+	// Serve the web UI
+	h.mux.Handle("/", web.Handler())
 
 	// Middleware
 	return h.loggingMiddleware(h.corsMiddleware(h.mux))
@@ -80,45 +97,197 @@ func (h *Handler) corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleModels returns available models
+// resolveAuth picks the upstream auth header per request:
+//  1. client's x-api-key header, if non-empty (empty/whitespace is ignored
+//     so a stale "x-api-key:" never reaches the upstream)
+//  2. client's Authorization Bearer header (if non-empty)
+//  3. a random key from UPSTREAM_API_KEYS (spreads quota/rate limits across
+//     multiple accounts when the client sends no key)
+//  4. the configured UPSTREAM_API_KEY (as Bearer)
+//  5. OpenCode Zen's public access via "x-api-key: public"
+func (h *Handler) resolveAuth(r *http.Request) upstream.Auth {
+	if key := strings.TrimSpace(r.Header.Get("x-api-key")); key != "" {
+		return upstream.Auth{Header: "x-api-key", Value: key}
+	}
+	if key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); key != "" {
+		return upstream.Auth{Header: "Authorization", Value: "Bearer " + key}
+	}
+	if len(h.cfg.UpstreamAPIKeys) > 0 {
+		return authForEntry(h.cfg.UpstreamAPIKeys[rand.IntN(len(h.cfg.UpstreamAPIKeys))])
+	}
+	if h.cfg.UpstreamAPIKey != "" {
+		return upstream.Auth{Header: "Authorization", Value: "Bearer " + h.cfg.UpstreamAPIKey}
+	}
+	return upstream.Auth{Header: "x-api-key", Value: "public"}
+}
+
+// authForEntry maps an UPSTREAM_API_KEYS entry to an upstream auth header:
+//   - "header:value" → sent as-is on that header
+//   - "public..."    → sent as "x-api-key: <value>"
+//   - anything else  → sent as "Authorization: Bearer <value>"
+func authForEntry(entry string) upstream.Auth {
+	if i := strings.Index(entry, ":"); i > 0 {
+		return upstream.Auth{Header: entry[:i], Value: entry[i+1:]}
+	}
+	if strings.HasPrefix(entry, "public") {
+		return upstream.Auth{Header: "x-api-key", Value: entry}
+	}
+	return upstream.Auth{Header: "Authorization", Value: "Bearer " + entry}
+}
+
+// handleModels returns the model list from the upstream provider
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
-	// For now, return a static list of free models
-	// In production, this could proxy to upstream /v1/models
-	models := map[string]interface{}{
-		"object": "list",
-		"data": []map[string]interface{}{
-			{
-				"id":       "openrouter/auto",
-				"object":   "model",
-				"created":  time.Now().Unix(),
-				"owned_by": "openrouter",
-			},
-			{
-				"id":       "meta-llama/llama-3.1-8b-instruct:free",
-				"object":   "model",
-				"created":  time.Now().Unix(),
-				"owned_by": "meta",
-			},
-			{
-				"id":       "google/gemma-2-9b-it:free",
-				"object":   "model",
-				"created":  time.Now().Unix(),
-				"owned_by": "google",
-			},
-			{
-				"id":       "mistralai/mistral-7b-instruct:free",
-				"object":   "model",
-				"created":  time.Now().Unix(),
-				"owned_by": "mistralai",
-			},
-		},
+	auth := h.resolveAuth(r)
+
+	// Get proxy from pool, bounded by RateLimitFreshIPWait so a fully-banned
+	// pool returns 429 + Retry-After instead of hanging the client.
+	ctx := r.Context()
+	acquireCtx, cancel := context.WithTimeout(ctx, h.cfg.RateLimitFreshIPWait)
+	proxy, err := h.pool.GetProxy(acquireCtx, "")
+	cancel()
+	if err != nil {
+		h.writeError(w, http.StatusTooManyRequests, "Rate limited by upstream provider, try again later")
+		w.Header().Set("Retry-After", h.cfg.RateLimitRetryAfter)
+		h.log.Warn().Msg("No unbanned proxy available within wait window")
+		return
 	}
 
-	h.writeJSON(w, http.StatusOK, models)
+	// Forward with retry. On an upstream rate limit we ban the proxy's egress
+	// IP and wait (bounded by RateLimitFreshIPWait) for a fresh, unbanned
+	// proxy whose new WARP container has booted, rather than immediately
+	// returning 429 to the client.
+	var lastErr error
+	var rateLimited bool
+	freshDeadline := time.Time{}
+
+	for attempt := 0; attempt <= h.cfg.MaxRetries; attempt++ {
+		if attempt > 0 {
+			if rateLimited {
+				if freshDeadline.IsZero() {
+					freshDeadline = time.Now().Add(h.cfg.RateLimitFreshIPWait)
+				}
+				left := time.Until(freshDeadline)
+				if left <= 0 {
+					rateLimited = false
+					lastErr = fmt.Errorf("rate limited: timed out waiting for a fresh proxy")
+					break
+				}
+				waitCtx, cancel := context.WithTimeout(ctx, left)
+				proxy, err = h.pool.GetProxy(waitCtx, "")
+				cancel()
+				if err != nil {
+					lastErr = err
+					rateLimited = false
+					break
+				}
+				// Fresh proxy acquired; use it for this attempt directly.
+				rateLimited = false
+				continue
+			}
+			delay := h.calculateRetryDelay(attempt)
+			h.log.Warn().Int("attempt", attempt).Dur("delay", delay).Msg("Retrying models request")
+			time.Sleep(delay)
+		}
+
+		resp, rl, err := h.client.DoModels(ctx, proxy, auth)
+
+		if rl != nil {
+			h.pool.MarkRateLimited(proxy, rl.RetryAfter)
+			proxy = nil
+			rateLimited = true
+			lastErr = fmt.Errorf("rate limited by upstream")
+			continue
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		h.handleModelList(w, resp)
+		h.pool.ReleaseProxy(proxy)
+		return
+	}
+
+	if rateLimited {
+		w.Header().Set("Retry-After", h.cfg.RateLimitRetryAfter)
+		h.writeError(w, http.StatusTooManyRequests, "Rate limited by upstream provider, try again later")
+		h.log.Warn().Msg("Models request rate limited by upstream, all fresh IPs exhausted")
+		return
+	}
+
+	if lastErr != nil && proxy != nil {
+		h.pool.ReleaseProxy(proxy)
+	}
+	h.writeError(w, http.StatusBadGateway, fmt.Sprintf("Failed to fetch models: %v", lastErr))
+}
+
+// handleModelList relays the upstream /v1/models response, optionally keeping
+// only models whose name matches the configured MODEL_FILTER substring.
+func (h *Handler) handleModelList(w http.ResponseWriter, resp *http.Response) {
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.writeError(w, http.StatusBadGateway, "Failed to read upstream response")
+		return
+	}
+
+	out := body
+	if h.cfg.ModelFilter != "" {
+		if filtered, ok := filterModels(body, h.cfg.ModelFilter); ok {
+			out = filtered
+		} else {
+			h.log.Debug().Str("filter", h.cfg.ModelFilter).Msg("Model filter could not be applied, relaying original list")
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(out)
+}
+
+// filterModels keeps only models whose id (or name) contains the pattern
+// (case-insensitive). Returns ok=false when the payload can't be parsed.
+func filterModels(body []byte, pattern string) ([]byte, bool) {
+	var list map[string]any
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, false
+	}
+
+	data, ok := list["data"].([]any)
+	if !ok {
+		return nil, false
+	}
+
+	pattern = strings.ToLower(pattern)
+	kept := make([]any, 0, len(data))
+	for _, item := range data {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			kept = append(kept, item)
+			continue
+		}
+		name, _ := entry["id"].(string)
+		if name == "" {
+			name, _ = entry["name"].(string)
+		}
+		if strings.Contains(strings.ToLower(name), pattern) {
+			kept = append(kept, item)
+		}
+	}
+
+	list["data"] = kept
+	out, err := json.Marshal(list)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // handleChatCompletions handles chat completion requests
 func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	// Read request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -138,22 +307,38 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	// Get API key from Authorization header
-	authHeader := r.Header.Get("Authorization")
-	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
-	if apiKey == "" {
-		apiKey = h.cfg.UpstreamAPIKey
-	}
-
-	// Get proxy from pool
-	ctx := r.Context()
-	proxy, err := h.pool.GetProxy(ctx, req.ConversationID)
-	if err != nil {
-		h.writeError(w, http.StatusServiceUnavailable, "No proxy available")
+	if len(req.Messages) == 0 {
+		h.writeError(w, http.StatusBadRequest, "messages is required")
 		return
 	}
-	defer h.pool.ReleaseProxy(proxy)
+
+	// metrics records the outcome of the request
+	record := func(success bool, status int) {
+		if h.metrics == nil {
+			return
+		}
+		if err := h.metrics.Record(req.Model, req.Stream, success, status, time.Since(start)); err != nil {
+			h.log.Debug().Err(err).Msg("Failed to record metrics")
+		}
+	}
+
+	// Upstream auth: client's Authorization header, configured key, or
+	// public access via x-api-key
+	auth := h.resolveAuth(r)
+
+	// Get proxy from pool, bounded by RateLimitFreshIPWait so a fully-banned
+	// pool returns 429 + Retry-After instead of hanging the client.
+	ctx := r.Context()
+	acquireCtx, cancel := context.WithTimeout(ctx, h.cfg.RateLimitFreshIPWait)
+	proxy, err := h.pool.GetProxy(acquireCtx, req.ConversationID)
+	cancel()
+	if err != nil {
+		w.Header().Set("Retry-After", h.cfg.RateLimitRetryAfter)
+		h.writeError(w, http.StatusTooManyRequests, "Rate limited by upstream provider, try again later")
+		h.log.Warn().Msg("No unbanned proxy available within wait window")
+		record(false, http.StatusTooManyRequests)
+		return
+	}
 
 	h.log.Debug().
 		Str("proxy_id", proxy.ID).
@@ -161,52 +346,97 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		Bool("stream", req.Stream).
 		Msg("Processing request")
 
-	// Forward request with retry
+	// Forward request with retry. On upstream rate limit, ban the egress IP
+	// and wait (bounded by RateLimitFreshIPWait) for a fresh proxy.
 	var lastErr error
+	var rateLimited bool
+	freshDeadline := time.Time{}
+	ownProxy := proxy
+
 	for attempt := 0; attempt <= h.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
-			// Wait before retry
-			delay := h.calculateRetryDelay(attempt)
-			h.log.Warn().
-				Int("attempt", attempt).
-				Dur("delay", delay).
-				Msg("Retrying request")
-
-			time.Sleep(delay)
-
-			// Get new proxy for retry
-			h.pool.MarkRateLimited(proxy)
-			proxy, err = h.pool.GetProxy(ctx, req.ConversationID)
-			if err != nil {
-				lastErr = err
+			if rateLimited {
+				if freshDeadline.IsZero() {
+					freshDeadline = time.Now().Add(h.cfg.RateLimitFreshIPWait)
+				}
+				left := time.Until(freshDeadline)
+				if left <= 0 {
+					rateLimited = false
+					lastErr = fmt.Errorf("rate limited: timed out waiting for a fresh proxy")
+					break
+				}
+				waitCtx, cancel := context.WithTimeout(ctx, left)
+				ownProxy, err = h.pool.GetProxy(waitCtx, req.ConversationID)
+				cancel()
+				if err != nil {
+					lastErr = err
+					rateLimited = false
+					break
+				}
+				proxy = ownProxy
+				rateLimited = false
 				continue
 			}
+			delay := h.calculateRetryDelay(attempt)
+			h.log.Warn().Int("attempt", attempt).Dur("delay", delay).Msg("Retrying request")
+			time.Sleep(delay)
 		}
 
 		// Make request
-		resp, rateLimited, err := h.client.Do(ctx, proxy, body, apiKey, req.Stream)
+		resp, rl, err := h.client.Do(ctx, proxy, body, auth, req.Stream)
+
+		// Rate limit check first: Do reports rate limits with a non-nil rl
+		// value (and a non-nil error too) — never treat them as transport
+		// failures.
+		if rl != nil {
+			h.pool.MarkRateLimited(proxy, rl.RetryAfter)
+			rateLimited = true
+			lastErr = fmt.Errorf("rate limited by upstream")
+			continue
+		}
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
-		// Check for rate limit
-		if rateLimited {
-			lastErr = fmt.Errorf("rate limited")
-			continue
-		}
-
-		// Stream or return response
-		if req.Stream {
+		// Stream or return response. Non-2xx upstream responses (e.g. auth
+		// errors) are relayed as-is with their real status even when the
+		// client requested streaming, so errors stay visible to the caller.
+		if req.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			h.handleStreamResponse(w, resp, proxy)
 		} else {
 			h.handleNormalResponse(w, resp)
 		}
+		h.log.Info().
+			Str("model", req.Model).
+			Bool("stream", req.Stream).
+			Dur("duration", time.Since(start)).
+			Msg("Request completed")
+		record(true, resp.StatusCode)
+		h.pool.ReleaseProxy(ownProxy)
 		return
 	}
 
-	// All retries failed
+	h.pool.ReleaseProxy(ownProxy)
+
+	// If the upstream is throttling us, say so honestly (429 + Retry-After)
+	// instead of masking it as a 502 server error.
+	if rateLimited {
+		w.Header().Set("Retry-After", h.cfg.RateLimitRetryAfter)
+		h.writeError(w, http.StatusTooManyRequests, "Rate limited by upstream provider, try again later")
+		h.log.Warn().
+			Str("model", req.Model).
+			Msg("Request rate limited by upstream, all fresh IPs exhausted")
+		record(false, http.StatusTooManyRequests)
+		return
+	}
+
 	h.writeError(w, http.StatusBadGateway, fmt.Sprintf("Request failed: %v", lastErr))
+	h.log.Error().
+		Str("model", req.Model).
+		Err(lastErr).
+		Msg("Request failed")
+	record(false, http.StatusBadGateway)
 }
 
 // handleStreamResponse handles streaming (SSE) responses
@@ -288,6 +518,25 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, stats)
 }
 
+// handleMetrics returns the pooled metrics snapshot plus proxy pool statistics
+func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]interface{}{
+		"pool":    h.pool.Stats(),
+		"proxies": h.pool.List(),
+	}
+
+	if h.metrics != nil {
+		snap, err := h.metrics.Snapshot()
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, "Failed to load metrics")
+			return
+		}
+		resp["metrics"] = snap
+	}
+
+	h.writeJSON(w, http.StatusOK, resp)
+}
+
 // writeJSON writes JSON response
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -334,4 +583,12 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Flush implements http.Flusher so SSE streaming works through the
+// logging middleware (net/http's ResponseWriter otherwise hides Flush).
+func (rw *responseWriter) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
