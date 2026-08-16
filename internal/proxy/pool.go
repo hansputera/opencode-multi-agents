@@ -30,6 +30,11 @@ type PoolManager struct {
 	// selection (upstream rate limited them). Guarded by mu.
 	ipBans map[string]time.Time
 
+	// spawning counts replacement containers currently being created by
+	// ensurePoolCapacity (guarded by mu) so concurrent triggers never spawn
+	// more than the deficit.
+	spawning int
+
 	// Signals
 	available chan struct{}
 	done      chan struct{}
@@ -255,16 +260,113 @@ func (pm *PoolManager) ReleaseProxy(proxy *Proxy) {
 	}
 }
 
+// usableCountLocked counts proxies that are healthy (idle/active) and whose
+// egress IP is not currently banned. Callers must hold pm.mu (read or write).
+func (pm *PoolManager) usableCountLocked(now time.Time) int {
+	n := 0
+	for _, pr := range pm.pool {
+		if pr.IsHealthy() && !pm.ipBannedLocked(pr.EgressIP, now) {
+			n++
+		}
+	}
+	return n
+}
+
+// ensurePoolCapacity keeps the pool topped up: whenever fewer than
+// ProxyPoolSize proxies are usable (healthy and unbanned), it asynchronously
+// spawns fresh containers for the exact deficit. Safe to call concurrently —
+// a spawning counter prevents duplicate spawns. Once replacements come up,
+// pruneDeadProxies removes the dead (cooldown/unhealthy) ones, so the pool
+// settles at exactly ProxyPoolSize usable containers and never grows past
+// ProxyPoolSize + the deficit being created.
+func (pm *PoolManager) ensurePoolCapacity(ctx context.Context) {
+	pm.mu.Lock()
+	now := time.Now()
+	usable := pm.usableCountLocked(now)
+	deficit := pm.cfg.ProxyPoolSize - usable
+	toSpawn := deficit - pm.spawning
+	if toSpawn < 0 {
+		toSpawn = 0
+	}
+	if toSpawn > 0 {
+		pm.spawning += toSpawn
+	}
+	pm.mu.Unlock()
+
+	if toSpawn <= 0 || pm.mgr == nil {
+		pm.pruneDeadProxies()
+		return
+	}
+
+	pm.log.Info().
+		Int("usable", usable).
+		Int("target", pm.cfg.ProxyPoolSize).
+		Int("spawning", toSpawn).
+		Msg("Pool below capacity, spawning replacement proxies")
+
+	for i := 0; i < toSpawn; i++ {
+		go func() {
+			defer pm.spawnDone()
+			spawnCtx, cancel := context.WithTimeout(context.Background(), pm.cfg.RateLimitFreshIPWait+time.Minute)
+			defer cancel()
+			if err := pm.createProxy(spawnCtx); err != nil {
+				pm.log.Error().Err(err).Msg("Failed to spawn replacement proxy for pool capacity")
+			}
+			pm.pruneDeadProxies()
+		}()
+	}
+}
+
+// spawnDone decrements the in-flight spawn counter.
+func (pm *PoolManager) spawnDone() {
+	pm.mu.Lock()
+	if pm.spawning > 0 {
+		pm.spawning--
+	}
+	pm.mu.Unlock()
+}
+
+// pruneDeadProxies removes cooldown/unhealthy proxies (containers + pool
+// entries) that are no longer needed, keeping total pool size at or below
+// ProxyPoolSize. Dead proxies are always removed first so a freshly topped-up
+// pool deletes its old rate-limited containers and settles at exactly the
+// configured size.
+func (pm *PoolManager) pruneDeadProxies() {
+	pm.mu.Lock()
+	var toRemove []string
+	for _, pr := range pm.pool {
+		if pr.State == StateCooldown || pr.State == StateUnhealthy {
+			toRemove = append(toRemove, pr.ID)
+		}
+	}
+	// Never shrink below the configured pool size.
+	if excess := len(pm.pool) - pm.cfg.ProxyPoolSize; excess > 0 && len(toRemove) > excess {
+		toRemove = toRemove[:excess]
+	}
+	pm.mu.Unlock()
+
+	if len(toRemove) == 0 || pm.mgr == nil {
+		return
+	}
+
+	pm.log.Info().Int("removed", len(toRemove)).Int("pool_total", len(pm.pool)).Msg("Pruning dead proxies")
+	for _, id := range toRemove {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := pm.RemoveProxy(ctx, id); err != nil {
+			pm.log.Error().Err(err).Str("proxy_id", id).Msg("Failed to prune dead proxy")
+		}
+		cancel()
+	}
+}
+
 // MarkRateLimited marks a proxy as rate limited: its egress IP is banned for
 // max(IPBanDuration, RetryAfter) so no request is routed through it, the proxy
-// itself is moved to cooldown, and (only when not publicTier) a replacement
-// container is spun up.
+// itself is moved to cooldown, and the pool is topped up with a fresh
+// replacement container (regardless of tier — see ensurePoolCapacity).
 //
-// publicTier=true means the upstream throttle is tied to account identity, not
-// to egress IP (e.g. OpenCode Zen "public" key). Spinning a fresh WARP
-// container would just hit the same identity-based 429 again, so no replacement
-// is spawned in that case — the caller is expected to surface 429+Retry-After
-// to the client rather than churn the pool.
+// publicTier indicates the upstream throttle is tied to account identity
+// rather than egress IP; it is informational (the caller already surfaces
+// 429+Retry-After immediately for public tier; self-healing still runs).
 func (pm *PoolManager) MarkRateLimited(proxy *Proxy, retryAfter string, publicTier bool) {
 	banFor := pm.cfg.IPBanDuration
 	if retryAfter != "" {
@@ -299,34 +401,9 @@ func (pm *PoolManager) MarkRateLimited(proxy *Proxy, retryAfter string, publicTi
 	}
 	pm.mu.Unlock()
 
-	// Public-tier 429s are identity-based, not IP-based, so a fresh proxy
-	// cannot help — don't spin a replacement and grow the pool.
-	if publicTier {
-		return
-	}
-
-	// Try to spin up a replacement with a fresh, unbanned egress IP.
-	go func() {
-		pm.mu.RLock()
-		usable := 0
-		for _, pr := range pm.pool {
-			if pr.IsHealthy() && !pm.ipBannedLocked(pr.EgressIP, time.Now()) {
-				usable++
-			}
-		}
-		total := len(pm.pool)
-		pm.mu.RUnlock()
-
-		if usable >= pm.cfg.ProxyPoolSize || total >= pm.cfg.ProxyPoolSize*2 {
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), pm.cfg.RateLimitFreshIPWait+time.Minute)
-		defer cancel()
-		if err := pm.createProxy(ctx); err != nil {
-			pm.log.Error().Err(err).Msg("Failed to create replacement proxy after rate limit")
-		}
-	}()
+	// Top the pool back up to full capacity: spawn fresh containers for the
+	// deficit and prune the dead ones once replacements are ready.
+	pm.ensurePoolCapacity(context.Background())
 }
 
 // banIPLocked records that an egress IP is rate limited until the given time.
@@ -478,6 +555,7 @@ func (pm *PoolManager) cooldownLoop(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			pm.restoreCooldownProxies()
+			pm.ensurePoolCapacity(ctx)
 		case <-ctx.Done():
 			return
 		case <-pm.done:

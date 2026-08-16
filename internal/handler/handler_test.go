@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hansputera/opencode-multi-agents/internal/config"
 	"github.com/hansputera/opencode-multi-agents/internal/proxy"
@@ -483,14 +484,23 @@ func TestPublicTierRateLimitShortCircuits(t *testing.T) {
 		t.Errorf("Retry-After = %q, want 37 (upstream pass-through)", got)
 	}
 
-	// The pool must not have grown: public-tier 429 must not spawn a
-	// replacement container. The single original proxy is in cooldown.
+	// The pool self-heals in the background: the banned proxy is replaced by
+	// a fresh one and the dead container pruned, so the pool never grows past
+	// ProxyPoolSize and always returns to full usable capacity.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stats := pool.Stats()
+		if stats.Total == 1 && stats.Idle == 1 && stats.Cooldown == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	stats := pool.Stats()
 	if stats.Total != 1 {
-		t.Errorf("pool grew to %d proxies after public-tier 429, want 1 (no churn)", stats.Total)
+		t.Errorf("pool grew to %d proxies after public-tier 429, want 1 (capped at ProxyPoolSize)", stats.Total)
 	}
-	if stats.Cooldown != 1 {
-		t.Errorf("Cooldown = %d, want 1 (the banned proxy)", stats.Cooldown)
+	if stats.Cooldown != 0 || stats.Idle != 1 {
+		t.Errorf("after self-heal pool = idle=%d cooldown=%d, want idle=1 cooldown=0 (banned proxy replaced and pruned)", stats.Idle, stats.Cooldown)
 	}
 }
 // Run with: ZEN_LIVE=1 go test ./internal/handler/ -run TestZenLiveModels -v

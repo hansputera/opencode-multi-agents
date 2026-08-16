@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,5 +246,111 @@ func TestBannedExpiryUnblocks(t *testing.T) {
 	pm.mu.Unlock()
 	if banned {
 		t.Error("expired ban still active")
+	}
+}
+
+// stubManager fakes container management for pool scaling tests.
+type stubManager struct {
+	createCount int32
+	removeCount int32
+}
+
+func (s *stubManager) Create(ctx context.Context) (*Proxy, error) {
+	n := atomic.AddInt32(&s.createCount, 1)
+	return &Proxy{
+		ID:         fmt.Sprintf("stub-%d", n),
+		SOCKS5Addr: "socks5://127.0.0.1:9999",
+		State:      StateIdle,
+		EgressIP:   fmt.Sprintf("10.0.0.%d", n+100),
+	}, nil
+}
+
+func (s *stubManager) Remove(ctx context.Context, id string) error {
+	atomic.AddInt32(&s.removeCount, 1)
+	return nil
+}
+func (s *stubManager) HealthCheck(ctx context.Context, p *Proxy) (bool, error) { return true, nil }
+func (s *stubManager) Close() error                                            { return nil }
+
+// TestEnsurePoolCapacityScalesUpAndPrunes verifies that when every proxy in
+// the pool is dead (cooldown + banned IP), the pool spawns a fresh replacement
+// and prunes the dead container, settling at exactly ProxyPoolSize usable
+// proxies.
+func TestEnsurePoolCapacityScalesUpAndPrunes(t *testing.T) {
+	mgr := &stubManager{}
+	pm := newTestPool()
+	pm.mgr = mgr
+	pm.cfg.ProxyPoolSize = 1
+
+	pm.pool["dead"] = &Proxy{ID: "dead", EgressIP: "10.0.0.5", State: StateCooldown}
+	pm.ipBans["10.0.0.5"] = time.Now().Add(10 * time.Minute)
+
+	pm.ensurePoolCapacity(context.Background())
+
+	// Give the async spawn goroutine time to finish.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pm.mu.RLock()
+		total := len(pm.pool)
+		spawning := pm.spawning
+		pm.mu.RUnlock()
+		if total >= 1 && spawning == 0 && atomic.LoadInt32(&mgr.createCount) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	pm.mu.RLock()
+	total := len(pm.pool)
+	usable := pm.usableCountLocked(time.Now())
+	pm.mu.RUnlock()
+
+	if mgr.removeCount == 0 {
+		t.Error("expected dead proxy to be pruned (Remove called)")
+	}
+	if total != 1 {
+		t.Errorf("pool total = %d, want 1 (exactly ProxyPoolSize)", total)
+	}
+	if usable != 1 {
+		t.Errorf("usable = %d, want 1 (fresh replacement should be usable)", usable)
+	}
+}
+
+// TestEnsurePoolCapacityNoDoubleSpawn verifies that concurrent triggers don't
+// spawn more than the deficit.
+func TestEnsurePoolCapacityNoDoubleSpawn(t *testing.T) {
+	mgr := &stubManager{}
+	pm := newTestPool()
+	pm.mgr = mgr
+	pm.cfg.ProxyPoolSize = 2
+	pm.pool["dead1"] = &Proxy{ID: "dead1", EgressIP: "10.0.0.11", State: StateCooldown}
+	pm.pool["dead2"] = &Proxy{ID: "dead2", EgressIP: "10.0.0.12", State: StateCooldown}
+	pm.ipBans["10.0.0.11"] = time.Now().Add(10 * time.Minute)
+	pm.ipBans["10.0.0.12"] = time.Now().Add(10 * time.Minute)
+
+	// Fire several concurrent triggers.
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pm.ensurePoolCapacity(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pm.mu.RLock()
+		spawning := pm.spawning
+		pm.mu.RUnlock()
+		if spawning == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := atomic.LoadInt32(&mgr.createCount); got != 2 {
+		t.Errorf("creates = %d, want 2 (exactly the deficit, no double spawn)", got)
 	}
 }
