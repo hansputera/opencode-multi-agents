@@ -135,6 +135,28 @@ func authForEntry(entry string) upstream.Auth {
 	return upstream.Auth{Header: "Authorization", Value: "Bearer " + entry}
 }
 
+// isPublicTier reports whether auth selects OpenCode Zen's shared public tier
+// (the "public" / "public..." account). The public tier is rate limited by
+// account identity, not by egress IP, so rotating WARP containers cannot reset
+// a 429 — callers should short-circuit and return 429+Retry-After instead of
+// churning fresh proxies in a retry loop.
+func isPublicTier(auth upstream.Auth) bool {
+	if auth.Header != "x-api-key" {
+		return false
+	}
+	return strings.TrimSpace(auth.Value) == "public" || strings.HasPrefix(auth.Value, "public")
+}
+
+// retryAfterHeader chooses the Retry-After value to report to clients on an
+// upstream rate limit: prefer the upstream's Retry-After, fall back to the
+// configured static value.
+func retryAfterHeader(rl *upstream.RateLimit, fallback string) string {
+	if rl != nil && rl.RetryAfter != "" {
+		return rl.RetryAfter
+	}
+	return fallback
+}
+
 // handleModels returns the model list from the upstream provider
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	auth := h.resolveAuth(r)
@@ -192,7 +214,20 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		resp, rl, err := h.client.DoModels(ctx, proxy, auth)
 
 		if rl != nil {
-			h.pool.MarkRateLimited(proxy, rl.RetryAfter)
+			h.pool.MarkRateLimited(proxy, rl.RetryAfter, isPublicTier(auth))
+			// Public tier is rate limited by account identity, not by egress IP:
+			// spinning a fresh WARP container cannot reset it, so return an
+			// honest 429+Retry-After instead of churning the pool.
+			if isPublicTier(auth) {
+				w.Header().Set("Retry-After", retryAfterHeader(rl, h.cfg.RateLimitRetryAfter))
+				h.writeError(w, http.StatusTooManyRequests, fmt.Sprintf(
+					"Upstream rate limited (public tier); retry after %s second(s)",
+					retryAfterHeader(rl, h.cfg.RateLimitRetryAfter)))
+				h.log.Warn().
+					Str("path", r.URL.Path).
+					Msg("Public-tier 429: not rotating egress IP (identity shared across IPs); returning 429")
+				return
+			}
 			proxy = nil
 			rateLimited = true
 			lastErr = fmt.Errorf("rate limited by upstream")
@@ -389,9 +424,27 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// value (and a non-nil error too) — never treat them as transport
 		// failures.
 		if rl != nil {
-			h.pool.MarkRateLimited(proxy, rl.RetryAfter)
+			h.pool.MarkRateLimited(proxy, rl.RetryAfter, isPublicTier(auth))
+			// Public tier is rate limited by account identity, not by egress IP:
+			// spinning a fresh WARP container cannot reset it, so return an
+			// honest 429+Retry-After immediately instead of churning the pool.
+			if isPublicTier(auth) {
+				w.Header().Set("Retry-After", retryAfterHeader(rl, h.cfg.RateLimitRetryAfter))
+				h.writeError(w, http.StatusTooManyRequests, fmt.Sprintf(
+					"Upstream rate limited (public tier); retry after %s second(s)",
+					retryAfterHeader(rl, h.cfg.RateLimitRetryAfter)))
+				h.log.Warn().
+					Str("model", req.Model).
+					Bool("stream", req.Stream).
+					Msg("Public-tier 429: not rotating egress IP (identity shared across IPs); returning 429")
+				h.pool.ReleaseProxy(ownProxy)
+				record(false, http.StatusTooManyRequests)
+				return
+			}
 			rateLimited = true
 			lastErr = fmt.Errorf("rate limited by upstream")
+			// Don't release ownProxy here: the rate-limit retry path below
+			// replaces it with a fresh proxy via MarkRateLimited's replacement.
 			continue
 		}
 		if err != nil {

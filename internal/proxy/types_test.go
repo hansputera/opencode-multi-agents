@@ -213,7 +213,7 @@ func TestMarkRateLimitedBansForRetryAfter(t *testing.T) {
 
 	// Pre-ban briefly; MarkRateLimited must extend to max(config, RetryAfter).
 	pm.ipBans["10.0.0.3"] = time.Now().Add(5 * time.Minute)
-	pm.MarkRateLimited(pm.pool["p1"], "900")
+	pm.MarkRateLimited(pm.pool["p1"], "900", false)
 
 	pm.mu.RLock()
 	until := pm.ipBans["10.0.0.3"]

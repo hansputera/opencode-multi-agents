@@ -257,8 +257,15 @@ func (pm *PoolManager) ReleaseProxy(proxy *Proxy) {
 
 // MarkRateLimited marks a proxy as rate limited: its egress IP is banned for
 // max(IPBanDuration, RetryAfter) so no request is routed through it, the proxy
-// itself is moved to cooldown, and a replacement container is spun up.
-func (pm *PoolManager) MarkRateLimited(proxy *Proxy, retryAfter string) {
+// itself is moved to cooldown, and (only when not publicTier) a replacement
+// container is spun up.
+//
+// publicTier=true means the upstream throttle is tied to account identity, not
+// to egress IP (e.g. OpenCode Zen "public" key). Spinning a fresh WARP
+// container would just hit the same identity-based 429 again, so no replacement
+// is spawned in that case — the caller is expected to surface 429+Retry-After
+// to the client rather than churn the pool.
+func (pm *PoolManager) MarkRateLimited(proxy *Proxy, retryAfter string, publicTier bool) {
 	banFor := pm.cfg.IPBanDuration
 	if retryAfter != "" {
 		if secs, err := strconv.Atoi(retryAfter); err == nil && secs > 0 {
@@ -281,6 +288,7 @@ func (pm *PoolManager) MarkRateLimited(proxy *Proxy, retryAfter string) {
 			Str("ip", pr.EgressIP).
 			Dur("cooldown", pm.cfg.CooldownDuration).
 			Dur("ip_ban", banFor).
+			Bool("public_tier", publicTier).
 			Msg("Proxy rate limited, moving to cooldown and banning egress IP")
 	}
 
@@ -290,6 +298,12 @@ func (pm *PoolManager) MarkRateLimited(proxy *Proxy, retryAfter string) {
 	default:
 	}
 	pm.mu.Unlock()
+
+	// Public-tier 429s are identity-based, not IP-based, so a fresh proxy
+	// cannot help — don't spin a replacement and grow the pool.
+	if publicTier {
+		return
+	}
 
 	// Try to spin up a replacement with a fresh, unbanned egress IP.
 	go func() {

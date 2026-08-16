@@ -433,7 +433,66 @@ func TestRateLimitedReturns429(t *testing.T) {
 	}
 }
 
-// TestZenLiveModels verifies against the real OpenCode Zen endpoint.
+// TestPublicTierRateLimitShortCircuits verifies that when the upstream
+// rate-limits the shared "public" account (x-api-key: public), the gateway
+// returns 429 + Retry-After immediately and does NOT churn the proxy pool:
+// no replacement container is spawned, so the pool stays at its configured
+// size. Rotating egress IPs can't reset an identity-based public-tier 429.
+func TestPublicTierRateLimitShortCircuits(t *testing.T) {
+	socksAddr, stop := startSocks5(t)
+	defer stop()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "37")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"message":"rate limit exceeded"}}`))
+	}))
+	defer upstream.Close()
+
+	cfg := config.DefaultConfig()
+	cfg.UpstreamBaseURL = upstream.URL
+	cfg.UpstreamAPIKey = "" // no key -> public tier
+	cfg.MaxRetries = 3      // must NOT be exercised on public-tier 429
+	cfg.ProxyPoolSize = 1
+	cfg.RateLimitRetryAfter = "60"
+
+	log := testLogger()
+	mgr := &fakeManager{proxies: []*proxy.Proxy{
+		{ID: "p1", SOCKS5Addr: "socks5://" + socksAddr, State: proxy.StateIdle},
+	}}
+	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
+	pool.Start(context.Background())
+
+	h := New(cfg, pool, nil, log)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	body := `{"model":"gpt-5.1","messages":[{"role":"user","content":"hi"}]}`
+	res, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusTooManyRequests {
+		raw, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 429, got %d: %s", res.StatusCode, raw)
+	}
+	// Upstream Retry-After must be passed through (37), not the fallback (60).
+	if got := res.Header.Get("Retry-After"); got != "37" {
+		t.Errorf("Retry-After = %q, want 37 (upstream pass-through)", got)
+	}
+
+	// The pool must not have grown: public-tier 429 must not spawn a
+	// replacement container. The single original proxy is in cooldown.
+	stats := pool.Stats()
+	if stats.Total != 1 {
+		t.Errorf("pool grew to %d proxies after public-tier 429, want 1 (no churn)", stats.Total)
+	}
+	if stats.Cooldown != 1 {
+		t.Errorf("Cooldown = %d, want 1 (the banned proxy)", stats.Cooldown)
+	}
+}
 // Run with: ZEN_LIVE=1 go test ./internal/handler/ -run TestZenLiveModels -v
 // Uses a local SOCKS5 proxy (no WARP containers required).
 func TestZenLiveModels(t *testing.T) {
