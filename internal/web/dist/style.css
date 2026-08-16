@@ -149,6 +149,56 @@ body {
   margin-bottom: 0;
 }
 
+/* Thinking / reasoning block, shown above the answer when the model emits
+   reasoning tokens (e.g. Zen's delta.reasoning_content). */
+.think {
+  margin-bottom: 0.6rem;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  background: var(--cream);
+  overflow: hidden;
+}
+
+.think-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+  user-select: none;
+}
+
+.think-summary::-webkit-details-marker {
+  display: none;
+}
+
+.think-summary::before {
+  content: '▸';
+  display: inline-block;
+  transition: transform 0.15s ease;
+  font-size: 0.8rem;
+}
+
+.think[open] .think-summary::before {
+  transform: rotate(90deg);
+}
+
+.think-body {
+  border-top: 2px solid var(--ink);
+  padding: 0.5rem 0.6rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #55534f;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .chat-content pre {
   background: var(--ink);
   color: var(--yellow);

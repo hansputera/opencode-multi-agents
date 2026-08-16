@@ -283,17 +283,31 @@ const ChatView = {
           <div class="bubble-error max-w-[80%] px-4 py-2.5 text-sm whitespace-pre-wrap break-words">⚠️ ${esc(m.content)}</div>
         </div>`;
     }
+    const think = m.thinking ? this.thinkingBlock(m.thinking, false) : '';
     return `
       <div class="flex gap-3 fade-up">
         <div class="w-8 h-8 shrink-0 rounded-full bg-ink text-yellow font-black text-sm flex items-center justify-center border-[3px] border-yellow">⚡</div>
-        <div class="bubble-assistant max-w-[85%] px-4 py-2.5 chat-content text-sm break-words min-w-0">${renderMarkdown(m.content)}</div>
+        <div class="bubble-assistant max-w-[85%] px-4 py-2.5 chat-content text-sm break-words min-w-0">${think}${renderMarkdown(m.content)}</div>
       </div>`;
   },
 
-  updateBubble(el, content) {
+  // thinkingBlock renders a collapsible "Thinking" section. While streaming
+  // (streaming=true) it stays open and gets live-updated; after finish it is
+  // collapsed by default (click to expand).
+  thinkingBlock(text, streaming) {
+    const open = streaming ? ' open' : '';
+    return `
+      <details class="think${open}">
+        <summary class="think-summary">${streaming ? 'Thinking…' : 'Thinking'}</summary>
+        <div class="think-body">${esc(text)}</div>
+      </details>`;
+  },
+
+  updateBubble(el, content, thinking) {
     const holder = el.querySelector('.chat-content');
     if (holder) {
-      holder.innerHTML = renderMarkdown(content);
+      const think = thinking ? this.thinkingBlock(thinking, true) : '';
+      holder.innerHTML = think + renderMarkdown(content);
     } else {
       el.innerHTML = content;
     }
@@ -364,6 +378,7 @@ const ChatView = {
     this.state.aborter = agent;
 
     let acc = '';
+    let accThinking = '';
     let finished = false;
 
     const finish = (success, aborted) => {
@@ -380,16 +395,16 @@ const ChatView = {
       if (!success) {
         assistantEl.innerHTML = role === 'error'
           ? `<div class="flex gap-3"><div class="w-8 h-8 shrink-0 rounded-full bg-ink text-yellow font-black text-sm flex items-center justify-center border-[3px] border-yellow">⚡</div><div class="bubble-error max-w-[85%] px-4 py-2.5 text-sm whitespace-pre-wrap break-words">⚠️ ${esc(acc)}</div></div>`
-          : this.typingBubbleWith(acc);
+          : this.typingBubbleWith(acc, accThinking);
         this.scrollBottom();
       }
 
-conv = this.conversation(convId);
+ conv = this.conversation(convId);
       if (conv) {
         if (role === 'error') {
           conv.messages.push({ role: 'error', content: acc });
         } else {
-          conv.messages.push({ role: 'assistant', content: acc });
+          conv.messages.push({ role: 'assistant', content: acc, thinking: accThinking || undefined });
         }
         conv.updatedAt = Date.now();
         this.save(conv);
@@ -415,9 +430,10 @@ conv = this.conversation(convId);
         }
         return res.body.getReader();
       })
-      .then((reader) => this.readStream(reader, (delta) => {
+      .then((reader) => this.readStream(reader, (delta, thinking) => {
         acc += delta;
-        assistantEl.innerHTML = this.typingBubbleWith(acc);
+        if (thinking) accThinking += thinking;
+        this.updateBubble(assistantEl, acc, accThinking);
         this.scrollBottom();
       }))
       .then(() => finish(true, false))
@@ -432,11 +448,11 @@ conv = this.conversation(convId);
       });
   },
 
-  typingBubbleWith(text) {
+  typingBubbleWith(text, thinking) {
     return `
       <div class="flex gap-3">
         <div class="w-8 h-8 shrink-0 rounded-full bg-ink text-yellow font-black text-sm flex items-center justify-center border-[3px] border-yellow">⚡</div>
-        <div class="bubble-assistant max-w-[85%] px-4 py-2.5 chat-content text-sm break-words min-w-0">${renderMarkdown(text)}<span class="blink font-black">▌</span></div>
+        <div class="bubble-assistant max-w-[85%] px-4 py-2.5 chat-content text-sm break-words min-w-0">${this.thinkingBlock(thinking || '', true)}${renderMarkdown(text)}<span class="blink font-black">▌</span></div>
       </div>`;
   },
 
@@ -466,8 +482,15 @@ conv = this.conversation(convId);
         }
         const choices = json.choices || [];
         const ch = choices[0] || {};
-        const delta = (ch.delta && ch.delta.content) || ch.text || '';
-        if (delta) onDelta(delta);
+        const d = ch.delta || {};
+        const delta = d.content || ch.text || '';
+        const msg0 = ch.message || {};
+        // Thinking/reasoning tokens: Zen/DeepSeek emit delta.reasoning_content;
+        // tolerate other providers' variants (delta.reasoning, delta.thinking,
+        // choice/message-level reasoning).
+        const thinking = d.reasoning_content || d.reasoning || d.thinking || ch.reasoning || msg0.reasoning || msg0.reasoning_content || '';
+        if (delta) onDelta(delta, '');
+        if (thinking) onDelta('', thinking);
       }
     }
   },
