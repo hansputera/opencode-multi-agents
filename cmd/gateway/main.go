@@ -35,13 +35,19 @@ func main() {
 	}
 	defer poolMgr.Close()
 
-	// Start proxy pool
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := poolMgr.Start(ctx); err != nil {
-		log.Fatal().Err(err).Msg("Failed to start proxy pool")
-	}
+	// Start proxy pool population in the background: a fresh WARP container
+	// can take tens of seconds to boot, so the pool fills up asynchronously
+	// while the HTTP server below is already accepting connections. Starting
+	// the server only after the whole pool is ready would leave the gateway
+	// port unlistened for minutes and fail readiness/health checks.
+	go func() {
+		if err := poolMgr.Start(ctx); err != nil {
+			log.Error().Err(err).Msg("Failed to start proxy pool")
+		}
+	}()
 
 	// Initialize metrics store
 	metricsStore, err := metrics.New(cfg.MetricsDBPath)

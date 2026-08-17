@@ -26,8 +26,8 @@ WORKDIR /root/
 # Copy binary from builder
 COPY --from=builder /app/gateway .
 
-# Expose port
-EXPOSE 8080
+# Expose port (informational: docker-compose runs with host networking)
+EXPOSE 8082
 
 # Run
 CMD ["./gateway"]

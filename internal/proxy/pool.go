@@ -71,12 +71,22 @@ func NewPoolManagerWithManager(mgr Manager, cfg *config.Config, log *zerolog.Log
 func (pm *PoolManager) Start(ctx context.Context) error {
 	pm.log.Info().Int("pool_size", pm.cfg.ProxyPoolSize).Msg("Starting proxy pool")
 
+	// Create proxies concurrently: a single WARP first-boot can take tens of
+	// seconds (plus retry backoffs on failure), so creating them sequentially
+	// would keep the pool empty for minutes. The Docker manager is safe for
+	// concurrent use (atomic port allocator, mutex-guarded image ensure).
+	var wg sync.WaitGroup
 	for i := 0; i < pm.cfg.ProxyPoolSize; i++ {
-		if err := pm.createProxy(ctx); err != nil {
-			pm.log.Error().Err(err).Int("index", i).Msg("Failed to create proxy")
-			// Continue trying to create remaining proxies
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := pm.createProxy(ctx); err != nil {
+				pm.log.Error().Err(err).Msg("Failed to create proxy")
+				// Continue trying to create remaining proxies
+			}
+		}()
 	}
+	wg.Wait()
 
 	// Start background health check
 	go pm.healthCheckLoop(ctx)
@@ -131,6 +141,10 @@ func (pm *PoolManager) createProxy(ctx context.Context) error {
 		pm.mu.Lock()
 		pm.pool[proxy.ID] = proxy
 		pm.mu.Unlock()
+
+		if pm.mgr != nil {
+			proxy.SetManager(pm.mgr)
+		}
 
 		pm.log.Info().
 			Str("id", proxy.ID).
