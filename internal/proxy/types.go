@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,6 +30,10 @@ type Proxy struct {
 	ErrorCount   int          `json:"error_count"`
 	CreatedAt    time.Time    `json:"created_at"`
 	EgressIP     string       `json:"egress_ip"`
+
+	// manager is the container manager that created this proxy, used by
+	// ExecIn to docker-exec commands inside the container. Wired by the pool.
+	manager atomic.Pointer[Manager]
 }
 
 // IsHealthy returns true if the proxy is in a healthy state
@@ -61,4 +67,21 @@ type Manager interface {
 	HealthCheck(ctx context.Context, proxy *Proxy) (bool, error)
 	// Close cleans up all resources
 	Close() error
+	// Exec runs a command inside a proxy container and returns the output.
+	Exec(ctx context.Context, containerID string, env, args []string) ([]byte, error)
+}
+
+// ExecIn runs a command inside a proxy container via its manager.
+func (p *Proxy) ExecIn(ctx context.Context, env, args []string) ([]byte, error) {
+	mgr := p.manager.Load()
+	if mgr == nil {
+		return nil, fmt.Errorf("proxy %s has no manager", p.ID)
+	}
+	return (*mgr).Exec(ctx, p.ContainerID, env, args)
+}
+
+// SetManager wires the container manager used by ExecIn. The pool calls this
+// when a proxy is created; tests use it to inject fakes.
+func (p *Proxy) SetManager(mgr Manager) {
+	p.manager.Store(&mgr)
 }

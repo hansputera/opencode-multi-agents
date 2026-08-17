@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	_ "embed"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,16 +13,28 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	"github.com/hansputera/opencode-multi-agents/internal/config"
 	"github.com/rs/zerolog"
 	"golang.org/x/net/proxy"
 )
+
+// cliImageTag is the tag of the WARP image with the opencode CLI baked in,
+// built on demand by ensureCLIImage when UPSTREAM_PROVIDER=opencode-cli.
+const cliImageTag = "opencode-multi-agents/warp-opencode:latest"
+
+// opencodeWarpDockerfile is embedded so the gateway can build the CLI image
+// at runtime without shipping Dockerfiles on disk.
+//
+//go:embed assets/opencode-warp.Dockerfile
+var opencodeWarpDockerfile string
 
 // DockerManager manages WARP containers using Docker SDK
 type DockerManager struct {
@@ -30,6 +45,8 @@ type DockerManager struct {
 	namespace string // Container name prefix
 	imageMu   sync.Mutex
 	imageDone bool
+	cliOnce   sync.Once
+	cliErr    error
 }
 
 // NewDockerManager creates a new Docker manager
@@ -51,6 +68,17 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 	// the pool starts creating containers to avoid name conflicts.
 	dm.cleanupOrphans(context.Background())
 
+	// opencode-cli mode requires the baked image; build it synchronously so
+	// pool.Start creates containers from the right image.
+	if cfg.UpstreamProvider == "opencode-cli" {
+		buildCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		if err := dm.ensureCLIImage(buildCtx); err != nil {
+			return nil, fmt.Errorf("failed to prepare opencode CLI image: %w", err)
+		}
+		dm.cfg.WARPImage = cliImageTag
+	}
+
 	// Pull the WARP image in the background so containers can start immediately
 	go func() {
 		pullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -61,6 +89,91 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 	}()
 
 	return dm, nil
+}
+
+// ensureCLIImage makes sure the opencode CLI WARP image exists locally,
+// building it from the embedded Dockerfile on first use. Safe for concurrent
+// callers (sync.Once).
+func (dm *DockerManager) ensureCLIImage(ctx context.Context) error {
+	dm.cliOnce.Do(func() {
+		dm.log.Info().Str("image", cliImageTag).Msg("Ensuring opencode CLI WARP image")
+
+		if _, _, err := dm.cli.ImageInspectWithRaw(ctx, cliImageTag); err == nil {
+			dm.log.Info().Str("image", cliImageTag).Msg("opencode CLI WARP image already present")
+			return
+		}
+
+		dm.log.Info().Str("image", cliImageTag).Msg("Building opencode CLI WARP image (Node 20 + opencode-ai)...")
+
+		// Minimal build context: a single Dockerfile.
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		_ = tw.WriteHeader(&tar.Header{
+			Name: "opencode-warp.Dockerfile",
+			Mode: 0o644,
+			Size: int64(len(opencodeWarpDockerfile)),
+		})
+		_, _ = tw.Write([]byte(opencodeWarpDockerfile))
+		_ = tw.Close()
+
+		resp, err := dm.cli.ImageBuild(ctx, &buf, types.ImageBuildOptions{
+			Tags:        []string{cliImageTag},
+			Dockerfile:  "opencode-warp.Dockerfile",
+			Remove:      true,
+			ForceRemove: true,
+		})
+		if err != nil {
+			dm.cliErr = fmt.Errorf("opencode CLI image build failed: %w", err)
+			return
+		}
+		defer resp.Body.Close()
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			dm.cliErr = fmt.Errorf("opencode CLI image build: %w", err)
+			return
+		}
+
+		dm.log.Info().Str("image", cliImageTag).Msg("opencode CLI WARP image built")
+	})
+	return dm.cliErr
+}
+
+// Exec runs a command inside a proxy container (docker exec) as the container's
+// default user and returns the combined stdout+stderr output. Used by the
+// opencode-cli upstream driver to run `opencode run` inside each container.
+func (dm *DockerManager) Exec(ctx context.Context, containerID string, env, args []string) ([]byte, error) {
+	execCfg := container.ExecOptions{
+		AttachStdout: true,
+		AttachStderr: true,
+		Env:          env,
+		Cmd:          args,
+	}
+
+	idResp, err := dm.cli.ContainerExecCreate(ctx, containerID, execCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create exec: %w", err)
+	}
+
+	attach, err := dm.cli.ContainerExecAttach(ctx, idResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to attach to exec: %w", err)
+	}
+	defer attach.Close()
+
+	var stdout, stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, attach.Reader); err != nil {
+		return nil, fmt.Errorf("failed to read exec output: %w", err)
+	}
+
+	inspect, err := dm.cli.ContainerExecInspect(ctx, idResp.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect exec: %w", err)
+	}
+
+	out := append(stdout.Bytes(), stderr.Bytes()...)
+	if inspect.ExitCode != 0 {
+		return out, fmt.Errorf("exec exited with code %d (command: %s)", inspect.ExitCode, strings.Join(args, " "))
+	}
+	return out, nil
 }
 
 // ensureImage makes sure the WARP image is present locally, pulling it if needed.
@@ -108,13 +221,14 @@ func (dm *DockerManager) Create(ctx context.Context) (*Proxy, error) {
 	port := int(dm.nextPort.Add(1))
 	containerName := fmt.Sprintf("%s-%d", dm.namespace, port)
 
-	// Container configuration
+	// Container configuration. Env must stay nil: setting it to an empty
+	// slice replaces the image's ENV (PATH, HOME, ...), which would break
+	// `docker exec opencode ...` in CLI mode.
 	containerConfig := &container.Config{
-		Image: dm.cfg.WARPImage,
+		Image:        dm.cfg.WARPImage,
 		ExposedPorts: nat.PortSet{
 			"1080/tcp": struct{}{},
 		},
-		Env: []string{},
 		Labels: map[string]string{
 			"warp-gateway": "true",
 			"warp-port":    fmt.Sprintf("%d", port),
@@ -184,7 +298,8 @@ func (dm *DockerManager) Create(ctx context.Context) (*Proxy, error) {
 	return proxy, nil
 }
 
-// waitForReady waits for the WARP container to be ready
+// waitForReady waits for the WARP container to be ready. In opencode-cli mode
+// it also verifies the opencode CLI is present inside the container.
 func (dm *DockerManager) waitForReady(ctx context.Context, proxy *Proxy) error {
 	// WARP needs time on first boot to register and establish the tunnel.
 	timeout := time.After(120 * time.Second)
@@ -195,9 +310,16 @@ func (dm *DockerManager) waitForReady(ctx context.Context, proxy *Proxy) error {
 		select {
 		case <-ticker.C:
 			healthy, _ := dm.HealthCheck(ctx, proxy)
-			if healthy {
-				return nil
+			if !healthy {
+				continue
 			}
+			if dm.cfg.UpstreamProvider == "opencode-cli" {
+				if _, err := dm.Exec(ctx, proxy.ContainerID, nil, []string{"opencode", "--version"}); err != nil {
+					dm.log.Warn().Err(err).Str("proxy_id", proxy.ID).Msg("opencode CLI not ready yet")
+					continue
+				}
+			}
+			return nil
 		case <-timeout:
 			return fmt.Errorf("timeout waiting for container to be ready")
 		case <-ctx.Done():

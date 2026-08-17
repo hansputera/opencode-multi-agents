@@ -52,6 +52,9 @@ func (f *fakeManager) HealthCheck(ctx context.Context, p *proxy.Proxy) (bool, er
 	return true, nil
 }
 func (f *fakeManager) Close() error { return nil }
+func (f *fakeManager) Exec(ctx context.Context, id string, env, args []string) ([]byte, error) {
+	return []byte("fake-exec"), nil
+}
 
 // startSocks5 launches a minimal no-auth SOCKS5 server (RFC 1928)
 func startSocks5(t testing.TB) (addr string, cancel func()) {

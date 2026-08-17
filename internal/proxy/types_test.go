@@ -271,6 +271,9 @@ func (s *stubManager) Remove(ctx context.Context, id string) error {
 }
 func (s *stubManager) HealthCheck(ctx context.Context, p *Proxy) (bool, error) { return true, nil }
 func (s *stubManager) Close() error                                            { return nil }
+func (s *stubManager) Exec(ctx context.Context, id string, env, args []string) ([]byte, error) {
+	return []byte("stub-exec"), nil
+}
 
 // TestEnsurePoolCapacityScalesUpAndPrunes verifies that when every proxy in
 // the pool is dead (cooldown + banned IP), the pool spawns a fresh replacement

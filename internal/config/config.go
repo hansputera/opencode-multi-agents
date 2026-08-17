@@ -20,9 +20,10 @@ type Config struct {
 	UpstreamBaseURL string `yaml:"upstream_base_url" env:"UPSTREAM_BASE_URL"`
 	UpstreamAPIKey  string `yaml:"upstream_api_key" env:"UPSTREAM_API_KEY"`
 	// UpstreamProvider selects the upstream driver: "zen" (default, OpenAI
-	// compatible) or "opencode" (OpenCode Server HTTP API). In "opencode" mode
-	// each request is proxied through a fresh WARP container so the agent's
-	// egress IP is unique per request.
+	// compatible), "opencode" (OpenCode Server HTTP API) or "opencode-cli"
+	// (the opencode CLI baked into each WARP container, exec'd per request).
+	// In "opencode" and "opencode-cli" mode each request runs inside a fresh
+	// WARP container so the agent's egress IP is unique per request.
 	UpstreamProvider string `yaml:"upstream_provider" env:"UPSTREAM_PROVIDER"`
 	// OpenCodeServerURL is the base URL of a running `opencode serve` instance
 	// (default http://127.0.0.1:4096). Tunnelled through each proxy container.
@@ -36,6 +37,17 @@ type Config struct {
 	// the Authorization header (e.g. "anthropic", "openai").
 	OpenCodeProviderID string `yaml:"opencode_provider_id" env:"OPENCODE_PROVIDER_ID"`
 	OpenCodeModel    string `yaml:"opencode_model" env:"OPENCODE_MODEL"`
+
+	// opencode-cli mode: model override for `opencode run --model` (default
+	// empty = opencode's own default), the name of the provider env var that
+	// receives the client's Authorization header credential per exec (default
+	// ANTHROPIC_API_KEY), extra `opencode run` args, and a comma-separated
+	// model list override for /v1/models (default empty = live `opencode
+	// models` output).
+	OpenCodeCLIModel       string   `yaml:"opencode_cli_model" env:"OPENCODE_CLI_MODEL"`
+	OpenCodeCLIProviderEnv string   `yaml:"opencode_cli_provider_env" env:"OPENCODE_CLI_PROVIDER_ENV"`
+	OpenCodeCLIArgs        []string `yaml:"opencode_cli_args" env:"OPENCODE_CLI_ARGS"`
+	OpenCodeCLIModels      []string `yaml:"opencode_cli_models" env:"OPENCODE_CLI_MODELS"`
 
 	// Proxy pool configuration
 	ProxyPoolSize      int           `yaml:"proxy_pool_size" env:"PROXY_POOL_SIZE"`
@@ -100,6 +112,7 @@ func DefaultConfig() *Config {
 		UpstreamBaseURL:     "https://opencode.ai/zen/v1",
 		UpstreamProvider:    "zen",
 		OpenCodeServerURL:   "http://127.0.0.1:4096",
+		OpenCodeCLIProviderEnv: "ANTHROPIC_API_KEY",
 		ProxyPoolSize:       3,
 		ProxyBasePort:       10801,
 		WARPImage:           "caomingjun/warp:latest",
@@ -178,6 +191,26 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("OPENCODE_MODEL"); v != "" {
 		c.OpenCodeModel = v
 	}
+	if v := os.Getenv("OPENCODE_CLI_MODEL"); v != "" {
+		c.OpenCodeCLIModel = v
+	}
+	if v := os.Getenv("OPENCODE_CLI_PROVIDER_ENV"); v != "" {
+		c.OpenCodeCLIProviderEnv = v
+	}
+	if v := os.Getenv("OPENCODE_CLI_ARGS"); v != "" {
+		for _, a := range strings.Split(v, " ") {
+			if a = strings.TrimSpace(a); a != "" {
+				c.OpenCodeCLIArgs = append(c.OpenCodeCLIArgs, a)
+			}
+		}
+	}
+	if v := os.Getenv("OPENCODE_CLI_MODELS"); v != "" {
+		for _, m := range strings.Split(v, ",") {
+			if m = strings.TrimSpace(m); m != "" {
+				c.OpenCodeCLIModels = append(c.OpenCodeCLIModels, m)
+			}
+		}
+	}
 	if v := os.Getenv("UPSTREAM_API_KEYS"); v != "" {
 		for _, k := range strings.Split(v, ",") {
 			if k = strings.TrimSpace(k); k != "" {
@@ -213,6 +246,13 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("RESOURCE_MEMORY_LIMIT"); v != "" {
 		c.ResourceMemoryLimit = v
+	}
+	// opencode-cli mode hosts the opencode (Node/Bun) runtime per container:
+	// the 512M default OOM-kills it mid-run (~600MB+ RSS observed). Use a
+	// larger default unless the operator set RESOURCE_MEMORY_LIMIT explicitly.
+	if c.UpstreamProvider == "opencode-cli" && os.Getenv("RESOURCE_MEMORY_LIMIT") == "" {
+		c.ResourceMemoryLimit = "2G"
+		c.ResourceCPULimit = "1.0"
 	}
 	if v := os.Getenv("MAX_RETRIES"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {

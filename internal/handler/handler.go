@@ -35,6 +35,8 @@ func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Stor
 	switch cfg.UpstreamProvider {
 	case "opencode":
 		client = upstream.NewOpenCodeClient(cfg, log)
+	case "opencode-cli":
+		client = upstream.NewOpenCodeCLIClient(cfg, log)
 	default:
 		client = upstream.NewClient(cfg, log)
 	}

@@ -57,11 +57,15 @@ cp .env.example .env
 | `UPSTREAM_BASE_URL` | Upstream API base URL (OpenAI-compatible, `/v1` auto-appended if missing) | `https://opencode.ai/zen/v1` |
 | `UPSTREAM_API_KEY` | Upstream API key (OpenCode Zen: `zent-...`). Leave empty for the public tier — the gateway then authenticates with `x-api-key: public` | - |
 | `UPSTREAM_API_KEYS` | Comma-separated key list; a **random** key is picked per request (when the client sends no `Authorization`) to spread quota/rate limits across accounts. Entries: `public`, `zent-...`, or `header:value` | - |
-| `UPSTREAM_PROVIDER` | Upstream driver: `zen` (default, raw OpenAI-compatible) or `opencode` (drive an [OpenCode Server](https://opencode.ai/docs/server) via HTTP). In both cases each request egresses through a unique per-container WARP IP | `zen` |
+| `UPSTREAM_PROVIDER` | Upstream driver: `zen` (default, raw OpenAI-compatible), `opencode` (drive an [OpenCode Server](https://opencode.ai/docs/server) via HTTP) or `opencode-cli` (docker-exec `opencode run` inside each WARP container). In all cases each request egresses through a unique per-container WARP IP | `zen` |
 | `OPENCODE_SERVER_URL` | Base URL of `opencode serve` (used when `UPSTREAM_PROVIDER=opencode`). Must be reachable through the proxy container's SOCKS5 tunnel | `http://127.0.0.1:4096` |
 | `OPENCODE_SERVER_PASSWORD` | Optional `OPENCODE_SERVER_PASSWORD` for OpenCode Server basic auth (`opencode`-mode) | - |
 | `OPENCODE_PROVIDER_ID` | OpenCode provider used for `/session/:id/message` (e.g. `openai`, `anthropic`). If empty, a client `Authorization: Bearer <key>` is PUT to `/auth/<provider>` | - |
 | `OPENCODE_MODEL` | Model handed to OpenCode's `/session/:id/message` (e.g. `gpt-5.1-codex`) | - |
+| `OPENCODE_CLI_MODEL` | Model override for `opencode run --model` (`opencode-cli` mode; empty = client's `model` field or the CLI default) | - |
+| `OPENCODE_CLI_PROVIDER_ENV` | Container env var injected with the client's credential per exec (`opencode-cli` mode) | `ANTHROPIC_API_KEY` |
+| `OPENCODE_CLI_ARGS` | Extra `opencode run` args (space-separated, e.g. `--agent build`) | - |
+| `OPENCODE_CLI_MODELS` | Comma-separated model list for `/v1/models` (empty = live `opencode models` output) | - |
 | `PROXY_POOL_SIZE` | Number of WARP containers | `3` |
 | `PROXY_BASE_PORT` | Starting port for WARP containers | `10801` |
 | `WARP_IMAGE` | Docker image for WARP | `caomingjun/warp:latest` |
@@ -241,6 +245,27 @@ opencode serve --port 4121 --hostname 0.0.0.0 &
 UPSTREAM_PROVIDER=opencode OPENCODE_SERVER_URL=http://<reachable-host>:4121 \
   OPENCODE_PROVIDER_ID=openai OPENCODE_MODEL=gpt-5.1-codex \
   docker compose up -d --build
+```
+
+## Agent Mode (opencode CLI in containers)
+
+Set `UPSTREAM_PROVIDER=opencode-cli` to run the **actual opencode CLI** inside every WARP container. At startup the gateway builds `opencode-multi-agents/warp-opencode:latest` (base WARP image + Node 20 + `opencode-ai`, see `internal/proxy/assets/opencode-warp.Dockerfile`), and each `/v1/chat/completions` request is `docker exec`'d as `opencode run --format json` **inside a container** — the agent's tool use, browsing and API calls all egress from that container's unique WARP IP. Thinking/reasoning is relayed and rendered in the chat UI.
+
+- **Auth**: this mode calls real provider APIs, so the client must send a real credential (`Authorization: Bearer sk-ant-...`). The gateway strips `Bearer ` and injects it as `OPENCODE_CLI_PROVIDER_ENV` (default `ANTHROPIC_API_KEY`; set `OPENAI_API_KEY`/`GEMINI_API_KEY` etc. to match your provider) on every exec.
+- **Models**: `/v1/models` runs `opencode models` inside a container; override with `OPENCODE_CLI_MODELS=provider:model,provider:model`.
+- **Streaming**: `opencode run` NDJSON events are relayed as OpenAI SSE (`reasoning` → `delta.reasoning_content`, `text` → `delta.content`, `error` events → error response). If no text event arrives (a known opencode stdout-flush bug), the raw stdout is relayed as plain text.
+- **Sessions**: `conversation_id` maps to a persistent opencode session (`--session`) for multi-turn continuity.
+- **Rate limits**: upstream throttling wording in the CLI output bans the container's egress IP and rotates in a fresh container, same as Zen mode.
+
+```bash
+# e.g. Anthropic provider; every exec injects ANTHROPIC_API_KEY=sk-ant-...
+UPSTREAM_PROVIDER=opencode-cli OPENCODE_CLI_PROVIDER_ENV=ANTHROPIC_API_KEY \
+  OPENCODE_CLI_MODEL=claude-sonnet-4-20250514 \
+  docker compose up -d --build
+
+curl -s http://localhost:8082/v1/chat/completions \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $ANTHROPIC_API_KEY" \
+  -d '{"model":"claude-sonnet-4","messages":[{"role":"user","content":"what is my egress IP?"}],"stream":true}'
 ```
 
 ## IP Rotation & Verification
