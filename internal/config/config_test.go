@@ -28,13 +28,15 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("PROXY_POOL_SIZE", "5")
 	os.Setenv("MAX_RETRIES", "5")
 	os.Setenv("LOG_LEVEL", "debug")
-	os.Setenv("PROTONVPN_PRIVATE_KEY_DIR", "/tmp/test-keys")
+	os.Setenv("PROTONVPN_USERNAME", "test@example.com")
+	os.Setenv("PROTONVPN_PASSWORD", "testpassword")
 	defer func() {
 		os.Unsetenv("LISTEN_ADDR")
 		os.Unsetenv("PROXY_POOL_SIZE")
 		os.Unsetenv("MAX_RETRIES")
 		os.Unsetenv("LOG_LEVEL")
-		os.Unsetenv("PROTONVPN_PRIVATE_KEY_DIR")
+		os.Unsetenv("PROTONVPN_USERNAME")
+		os.Unsetenv("PROTONVPN_PASSWORD")
 	}()
 
 	cfg, err := Load()
@@ -80,7 +82,8 @@ func TestValidation(t *testing.T) {
 				RateLimitFreshIPWait:    90 * time.Second,
 				RetryBaseDelay:          1 * time.Second,
 				RetryMaxDelay:           30 * time.Second,
-				ProtonVPNPrivateKeyDir:  "/tmp/test-keys",
+				ProtonVPNUsername:        "test@example.com",
+				ProtonVPNPassword:        "testpassword",
 				LogLevel:                "info",
 				LogFormat:               "json",
 			},
@@ -91,12 +94,13 @@ func TestValidation(t *testing.T) {
 			cfg: &Config{
 				UpstreamBaseURL:        "",
 				ProxyPoolSize:          3,
-				ProtonVPNPrivateKeyDir: "/tmp/test-keys",
+				ProtonVPNUsername:       "test@example.com",
+				ProtonVPNPassword:       "testpassword",
 			},
 			expectError: true,
 		},
 		{
-			name: "Missing ProtonVPN key dir",
+			name: "Missing ProtonVPN credentials",
 			cfg: &Config{
 				UpstreamBaseURL: "https://api.example.com",
 				ProxyPoolSize:   3,

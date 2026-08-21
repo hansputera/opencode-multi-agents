@@ -59,9 +59,12 @@ type Config struct {
 	ResourceMemoryLimit string        `yaml:"resource_memory_limit" env:"RESOURCE_MEMORY_LIMIT"`
 
 	// ProtonVPN configuration
-	ProtonVPNPrivateKeyDir string `yaml:"protonvpn_private_key_dir" env:"PROTONVPN_PRIVATE_KEY_DIR"`
-	ProtonVPNServer        string `yaml:"protonvpn_server" env:"PROTONVPN_SERVER"`
-	ProtonVPNIPCheckURL    string `yaml:"protonvpn_ip_check_url" env:"PROTONVPN_IP_CHECK_URL"`
+	ProtonVPNUsername  string `yaml:"protonvpn_username" env:"PROTONVPN_USERNAME"`
+	ProtonVPNPassword  string `yaml:"protonvpn_password" env:"PROTONVPN_PASSWORD"`
+	ProtonVPNAPIBase   string `yaml:"protonvpn_api_base" env:"PROTONVPN_API_BASE"`
+	ProtonVPNStorePath string `yaml:"protonvpn_store_path" env:"PROTONVPN_STORE_PATH"`
+	ProtonVPNRegions   string `yaml:"protonvpn_regions" env:"PROTONVPN_REGIONS"`
+	ProtonVPNIPCheckURL string `yaml:"protonvpn_ip_check_url" env:"PROTONVPN_IP_CHECK_URL"`
 
 	// Retry configuration
 	MaxRetries         int           `yaml:"max_retries" env:"MAX_RETRIES"`
@@ -128,7 +131,9 @@ func DefaultConfig() *Config {
 		ProxyPoolSize:       3,
 		ProxyBasePort:       10801,
 		VPNImage:            "ghcr.io/tprasadtp/protonwire:latest",
-		ProtonVPNServer:     "node-nl-01.protonvpn.net",
+		ProtonVPNAPIBase:    "https://account.protonvpn.com",
+		ProtonVPNStorePath:  "data/protonvpn.db",
+		ProtonVPNRegions:    "NL,US,JP,DE",
 		ProtonVPNIPCheckURL: "https://icanhazip.com/",
 		CooldownDuration:    5 * time.Minute,
 		HealthCheckPeriod:   30 * time.Second,
@@ -250,11 +255,20 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("VPN_IMAGE"); v != "" {
 		c.VPNImage = v
 	}
-	if v := os.Getenv("PROTONVPN_PRIVATE_KEY_DIR"); v != "" {
-		c.ProtonVPNPrivateKeyDir = v
+	if v := os.Getenv("PROTONVPN_USERNAME"); v != "" {
+		c.ProtonVPNUsername = v
 	}
-	if v := os.Getenv("PROTONVPN_SERVER"); v != "" {
-		c.ProtonVPNServer = v
+	if v := os.Getenv("PROTONVPN_PASSWORD"); v != "" {
+		c.ProtonVPNPassword = v
+	}
+	if v := os.Getenv("PROTONVPN_API_BASE"); v != "" {
+		c.ProtonVPNAPIBase = v
+	}
+	if v := os.Getenv("PROTONVPN_STORE_PATH"); v != "" {
+		c.ProtonVPNStorePath = v
+	}
+	if v := os.Getenv("PROTONVPN_REGIONS"); v != "" {
+		c.ProtonVPNRegions = v
 	}
 	if v := os.Getenv("PROTONVPN_IP_CHECK_URL"); v != "" {
 		c.ProtonVPNIPCheckURL = v
@@ -343,8 +357,11 @@ func (c *Config) Validate() error {
 	if c.ProxyBasePort < 1024 || c.ProxyBasePort > 65535 {
 		return fmt.Errorf("PROXY_BASE_PORT must be between 1024 and 65535")
 	}
-	if c.ProtonVPNPrivateKeyDir == "" {
-		return fmt.Errorf("PROTONVPN_PRIVATE_KEY_DIR is required")
+	if c.ProtonVPNUsername == "" {
+		return fmt.Errorf("PROTONVPN_USERNAME is required")
+	}
+	if c.ProtonVPNPassword == "" {
+		return fmt.Errorf("PROTONVPN_PASSWORD is required")
 	}
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("MAX_RETRIES cannot be negative")

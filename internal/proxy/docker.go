@@ -9,8 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +23,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	"github.com/hansputera/opencode-multi-agents/internal/config"
+	"github.com/hansputera/opencode-multi-agents/internal/protonvpn"
 	"github.com/rs/zerolog"
 	"golang.org/x/net/proxy"
 )
@@ -49,12 +48,12 @@ var protonwireEntrypoint string
 type DockerManager struct {
 	cli       *client.Client
 	cfg       *config.Config
+	protonvpn *protonvpn.Client
 	log       *zerolog.Logger
 	nextPort  atomic.Int32
 	namespace string // Container name prefix
 	imageMu   sync.Mutex
 	imageDone bool
-	keyIndex  atomic.Int32
 	vpnOnce   sync.Once
 	vpnErr    error
 }
@@ -66,9 +65,27 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 		return nil, fmt.Errorf("failed to create Docker client: %w", err)
 	}
 
+	// Initialize ProtonVPN store
+	store, err := protonvpn.NewStore(cfg.ProtonVPNStorePath)
+	if err != nil {
+		cli.Close()
+		return nil, fmt.Errorf("failed to create ProtonVPN store: %w", err)
+	}
+
+	// Initialize ProtonVPN client
+	protonClient := protonvpn.NewClient(store, cfg.ProtonVPNAPIBase, cfg.ProtonVPNUsername, cfg.ProtonVPNPassword, log)
+
+	// Ensure we have a valid session
+	if err := protonClient.EnsureSession(); err != nil {
+		cli.Close()
+		store.Close()
+		return nil, fmt.Errorf("failed to initialize ProtonVPN session: %w", err)
+	}
+
 	dm := &DockerManager{
 		cli:       cli,
 		cfg:       cfg,
+		protonvpn: protonClient,
 		log:       log,
 		namespace: "protonvpn-gateway",
 	}
@@ -83,6 +100,8 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 	buildCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	if err := dm.ensureVPNImage(buildCtx); err != nil {
+		cli.Close()
+		store.Close()
 		return nil, fmt.Errorf("failed to prepare VPN image: %w", err)
 	}
 
@@ -227,29 +246,36 @@ func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions map[string]
 		return nil, fmt.Errorf("VPN image unavailable: %w", err)
 	}
 
-	// Select key file (prefer unbanned regions)
-	keyFile, region, err := dm.nextKeyFile(bannedRegions)
+	// Select server from API
+	logical, server, err := dm.protonvpn.SelectServer("", bannedRegions)
 	if err != nil {
-		return nil, fmt.Errorf("no available key files: %w", err)
+		return nil, fmt.Errorf("failed to select server: %w", err)
+	}
+
+	// Get or create WireGuard keypair
+	privateKey, _, err := dm.protonvpn.GetOrCreateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get wireguard keys: %w", err)
+	}
+
+	// Get certificate (refresh if needed)
+	cert, err := dm.protonvpn.GetCertificate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get certificate: %w", err)
 	}
 
 	port := int(dm.nextPort.Add(1))
 	containerName := fmt.Sprintf("%s-%d", dm.namespace, port)
 
-	// Read the private key content for the environment variable
-	keyContent, err := os.ReadFile(keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read key file %s: %w", keyFile, err)
-	}
-	privateKey := strings.TrimSpace(string(keyContent))
-
 	// Container configuration
 	containerConfig := &container.Config{
 		Image: vpnImageTag,
 		Env: []string{
-			fmt.Sprintf("PROTONVPN_SERVER=%s", dm.cfg.ProtonVPNServer),
-			fmt.Sprintf("WIREGUARD_PRIVATE_KEY=%s", privateKey),
-			"SKIP_DNS_CONFIG=1",
+			"WIREGUARD_PRIVATE_KEY=" + privateKey,
+			"WIREGUARD_SERVER_PUBLIC_KEY=" + server.X25519PublicKey,
+			"WIREGUARD_ADDRESS=" + cert.Features.PeerIP + "/32",
+			"WIREGUARD_ENDPOINT=" + server.ExitIP + ":51820",
+			"WIREGUARD_DNS=10.2.0.1",
 		},
 		ExposedPorts: nat.PortSet{
 			"1080/tcp": struct{}{},
@@ -257,7 +283,8 @@ func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions map[string]
 		Labels: map[string]string{
 			"protonvpn-gateway": "true",
 			"protonvpn-port":    fmt.Sprintf("%d", port),
-			"protonvpn-region":  region,
+			"protonvpn-region":  logical.ExitCountry,
+			"protonvpn-server":  logical.Name,
 		},
 	}
 
@@ -312,8 +339,9 @@ func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions map[string]
 		State:       StateIdle,
 		CreatedAt:   time.Now(),
 		LastCheck:   time.Now(),
-		Region:      region,
-		KeyFile:     keyFile,
+		Region:      logical.ExitCountry,
+		ServerName:  logical.Name,
+		ServerIP:    server.ExitIP,
 	}
 
 	// Wait for container to be ready
@@ -445,64 +473,6 @@ func (dm *DockerManager) cleanupOrphans(ctx context.Context) {
 // Close closes the Docker client
 func (dm *DockerManager) Close() error {
 	return dm.cli.Close()
-}
-
-// nextKeyFile selects the next key file from the configured directory,
-// preferring regions that are not currently banned.
-func (dm *DockerManager) nextKeyFile(bannedRegions map[string]bool) (string, string, error) {
-	if dm.cfg.ProtonVPNPrivateKeyDir == "" {
-		return "", "", fmt.Errorf("PROTONVPN_PRIVATE_KEY_DIR is not configured")
-	}
-
-	files, err := os.ReadDir(dm.cfg.ProtonVPNPrivateKeyDir)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read key directory: %w", err)
-	}
-
-	// Collect key files and their regions
-	type keyEntry struct {
-		path   string
-		region string
-	}
-	var allKeys []keyEntry
-	var availableKeys []keyEntry
-
-	for _, f := range files {
-		if f.IsDir() || !strings.HasSuffix(f.Name(), ".key") {
-			continue
-		}
-		region := strings.TrimSuffix(f.Name(), ".key")
-		entry := keyEntry{
-			path:   filepath.Join(dm.cfg.ProtonVPNPrivateKeyDir, f.Name()),
-			region: region,
-		}
-		allKeys = append(allKeys, entry)
-		if bannedRegions == nil || !bannedRegions[region] {
-			availableKeys = append(availableKeys, entry)
-		}
-	}
-
-	if len(allKeys) == 0 {
-		return "", "", fmt.Errorf("no .key files found in %s", dm.cfg.ProtonVPNPrivateKeyDir)
-	}
-
-	// Prefer unbanned regions, fallback to all if all banned
-	keys := availableKeys
-	if len(keys) == 0 {
-		dm.log.Warn().Msg("All regions banned, using any available key")
-		keys = allKeys
-	}
-
-	// Round-robin selection
-	idx := int(dm.keyIndex.Add(1)-1) % len(keys)
-	selected := keys[idx]
-
-	dm.log.Debug().
-		Str("region", selected.region).
-		Str("key_file", filepath.Base(selected.path)).
-		Msg("Selected VPN key")
-
-	return selected.path, selected.region, nil
 }
 
 // parseCPUQuota parses CPU limit string to quota

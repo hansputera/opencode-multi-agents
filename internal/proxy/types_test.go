@@ -91,7 +91,8 @@ func TestProxyFields(t *testing.T) {
 		ErrorCount:   2,
 		CreatedAt:    now,
 		Region:       "nl-01",
-		KeyFile:      "/path/to/nl-01.key",
+		ServerName:   "NL-FREE#79",
+		ServerIP:     "185.177.124.84",
 	}
 
 	if proxy.ID != "test-123" {

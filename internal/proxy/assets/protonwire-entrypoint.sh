@@ -1,15 +1,29 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
-# Start gost SOCKS5 proxy on port 1080 in background.
-# Traffic entering port 1080 is forwarded through the WireGuard tunnel.
+# Configure WireGuard from environment variables
+cat > /etc/wireguard/wg0.conf << EOF
+[Interface]
+PrivateKey = ${WIREGUARD_PRIVATE_KEY}
+Address = ${WIREGUARD_ADDRESS}
+DNS = ${WIREGUARD_DNS}
+
+[Peer]
+PublicKey = ${WIREGUARD_SERVER_PUBLIC_KEY}
+Endpoint = ${WIREGUARD_ENDPOINT}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+
+# Start WireGuard
+wg-quick up wg0
+
+# Start gost SOCKS5 proxy
 gost -L=socks5://:1080 &
 GOST_PID=$!
 
-# Wait briefly for gost to be ready
+# Wait for gost to be ready
 sleep 1
 
-# Hand off to protonwire (runs in foreground, manages the WireGuard tunnel
-# and optional health-checks). If PROTONVPN_SERVER is not set, protonwire
-# will exit with an error, which is the correct behaviour.
-exec protonwire "$@"
+# Keep WireGuard running in foreground
+wait $GOST_PID

@@ -21,8 +21,11 @@ services:
       - PROXY_POOL_SIZE=${PROXY_POOL_SIZE:-10}
       - PROXY_BASE_PORT=${PROXY_BASE_PORT:-10801}
       - VPN_IMAGE=${VPN_IMAGE:-ghcr.io/tprasadtp/protonwire:latest}
-      - PROTONVPN_PRIVATE_KEY_DIR=/app/protonvpn-keys
-      - PROTONVPN_SERVER=${PROTONVPN_SERVER:-node-nl-01.protonvpn.net}
+      - PROTONVPN_USERNAME=${PROTONVPN_USERNAME}
+      - PROTONVPN_PASSWORD=${PROTONVPN_PASSWORD}
+      - PROTONVPN_API_BASE=${PROTONVPN_API_BASE:-https://account.protonvpn.com}
+      - PROTONVPN_STORE_PATH=/app/data/protonvpn.db
+      - PROTONVPN_REGIONS=${PROTONVPN_REGIONS:-NL,US,JP,DE}
       - PROTONVPN_IP_CHECK_URL=${PROTONVPN_IP_CHECK_URL:-https://icanhazip.com/}
       - RATE_LIMIT_COOLDOWN=${RATE_LIMIT_COOLDOWN:-5m}
       - RATE_LIMIT_RETRY_AFTER=${RATE_LIMIT_RETRY_AFTER:-60}
@@ -45,7 +48,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - gateway-data:/app/data
-      - ./protonvpn-keys:/app/protonvpn-keys:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${GATEWAY_PORT:-8082}/api/metrics > /dev/null || exit 1"]

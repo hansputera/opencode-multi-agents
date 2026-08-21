@@ -31,7 +31,8 @@ type Proxy struct {
 	CreatedAt    time.Time    `json:"created_at"`
 	EgressIP     string       `json:"egress_ip"`
 	Region       string       `json:"region"`
-	KeyFile      string       `json:"-"`
+	ServerName   string       `json:"server_name"`
+	ServerIP     string       `json:"server_ip"`
 
 	// manager is the container manager that created this proxy, used by
 	// ExecIn to docker-exec commands inside the container. Wired by the pool.
@@ -39,7 +40,7 @@ type Proxy struct {
 }
 
 // ProxySnapshot is a sanitized view of Proxy safe for API responses.
-// It excludes internal fields (ContainerID, SOCKS5Addr, KeyFile, ID).
+// It excludes internal fields (ContainerID, SOCKS5Addr, ID).
 type ProxySnapshot struct {
 	Port         int          `json:"port"`
 	State        ProxyState   `json:"state"`
@@ -50,6 +51,8 @@ type ProxySnapshot struct {
 	CreatedAt    time.Time    `json:"created_at"`
 	EgressIP     string       `json:"egress_ip"`
 	Region       string       `json:"region"`
+	ServerName   string       `json:"server_name"`
+	ServerIP     string       `json:"server_ip"`
 }
 
 // Snapshot returns a sanitized copy safe for API responses.
@@ -64,6 +67,8 @@ func (p *Proxy) Snapshot() ProxySnapshot {
 		CreatedAt:    p.CreatedAt,
 		EgressIP:     p.EgressIP,
 		Region:       p.Region,
+		ServerName:   p.ServerName,
+		ServerIP:     p.ServerIP,
 	}
 }
 
