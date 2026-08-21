@@ -100,6 +100,10 @@ type Config struct {
 	// Metrics
 	MetricsDBPath string `yaml:"metrics_db_path" env:"METRICS_DB_PATH"`
 
+	// Model pricing: map from model name to per-1M-token rates
+	// Format: "model_name:input_rate,output_rate,cached_rate;model_name:input_rate,output_rate,cached_rate"
+	ModelPricing string `yaml:"model_pricing" env:"MODEL_PRICING"`
+
 	// Upstream API keys (comma-separated). When the client sends no
 	// Authorization header, the gateway picks a random key per request to
 	// spread quota/rate limits across multiple accounts. Entries may be:
@@ -144,6 +148,7 @@ func DefaultConfig() *Config {
 		RequestTimeout:      60 * time.Second,
 		MetricsDBPath:       "data/metrics.db",
 		ModelFilter:         "-free",
+		ModelPricing:        "gpt-4o:2.50,10.00,1.25;gpt-4o-mini:0.15,0.60,0.075;gpt-4-turbo:10.00,30.00,5.00;gpt-3.5-turbo:0.50,1.50,0.25;claude-3-5-sonnet:3.00,15.00,1.50;claude-3-5-haiku:0.25,1.25,0.125",
 	}
 }
 
@@ -318,6 +323,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("METRICS_DB_PATH"); v != "" {
 		c.MetricsDBPath = v
+	}
+	if v := os.Getenv("MODEL_PRICING"); v != "" {
+		c.ModelPricing = v
 	}
 }
 

@@ -169,6 +169,7 @@ type cliChatResponse struct {
 	Created int64        `json:"created"`
 	Model   string       `json:"model"`
 	Choices []cliChoice  `json:"choices"`
+	Usage   *Usage       `json:"usage,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

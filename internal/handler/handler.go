@@ -22,13 +22,14 @@ import (
 
 // Handler handles HTTP requests for the OpenAI-compatible API
 type Handler struct {
-	cfg     *config.Config
-	pool    *proxy.PoolManager
-	client  upstream.Upstream
-	metrics *metrics.Store
+	cfg       *config.Config
+	pool      *proxy.PoolManager
+	client    upstream.Upstream
+	metrics   *metrics.Store
 	prometheus *metrics.PrometheusExporter
-	log     *zerolog.Logger
-	mux     *http.ServeMux
+	pricing   *metrics.PricingTable
+	log       *zerolog.Logger
+	mux       *http.ServeMux
 }
 
 // New creates a new HTTP handler
@@ -44,15 +45,17 @@ func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Stor
 	}
 
 	prometheus := metrics.NewPrometheusExporter(metricsStore)
+	pricing := metrics.NewPricingTable(cfg.ModelPricing)
 
 	h := &Handler{
-		cfg:     cfg,
-		pool:    pool,
-		client:  client,
-		metrics: metricsStore,
+		cfg:       cfg,
+		pool:      pool,
+		client:    client,
+		metrics:   metricsStore,
 		prometheus: prometheus,
-		log:     log,
-		mux:     http.NewServeMux(),
+		pricing:   pricing,
+		log:       log,
+		mux:       http.NewServeMux(),
 	}
 
 	// Register routes
@@ -409,16 +412,23 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// metrics records the outcome of the request
-	record := func(success bool, status int) {
+	record := func(success bool, status int, usage upstream.Usage) {
 		if h.metrics == nil {
 			return
 		}
-		if err := h.metrics.Record(req.Model, req.Stream, success, status, time.Since(start)); err != nil {
+		cost := h.pricing.EstimateCostFromUpstream(req.Model, usage.PromptTokens, usage.CompletionTokens, usage.CachedTokens)
+		mUsage := metrics.Usage{
+			PromptTokens:     usage.PromptTokens,
+			CompletionTokens: usage.CompletionTokens,
+			TotalTokens:      usage.TotalTokens,
+			CachedTokens:     usage.CachedTokens,
+		}
+		if err := h.metrics.Record(req.Model, req.Stream, success, status, time.Since(start), mUsage, cost); err != nil {
 			h.log.Warn().Err(err).Msg("Failed to record metrics")
 		}
 		// Record to Prometheus exporter
 		if h.prometheus != nil {
-			h.prometheus.RecordRequest(success)
+			h.prometheus.RecordRequest(success, mUsage, cost)
 		}
 	}
 
@@ -436,7 +446,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		w.Header().Set("Retry-After", h.cfg.RateLimitRetryAfter)
 		h.writeError(w, http.StatusTooManyRequests, "Rate limited by upstream provider, try again later")
 		h.log.Warn().Msg("No unbanned proxy available within wait window")
-		record(false, http.StatusTooManyRequests)
+		record(false, http.StatusTooManyRequests, upstream.Usage{})
 		return
 	}
 
@@ -503,7 +513,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					Bool("stream", req.Stream).
 					Msg("Public-tier 429: not rotating egress IP (identity shared across IPs); returning 429")
 				h.pool.ReleaseProxy(ownProxy)
-				record(false, http.StatusTooManyRequests)
+				record(false, http.StatusTooManyRequests, upstream.Usage{})
 				return
 			}
 			rateLimited = true
@@ -520,17 +530,20 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// Stream or return response. Non-2xx upstream responses (e.g. auth
 		// errors) are relayed as-is with their real status even when the
 		// client requested streaming, so errors stay visible to the caller.
+		var usage upstream.Usage
 		if req.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			h.handleStreamResponse(w, resp, proxy)
+			usage = h.handleStreamResponse(w, resp, proxy)
 		} else {
-			h.handleNormalResponse(w, resp)
+			usage = h.handleNormalResponse(w, resp)
 		}
 		h.log.Info().
 			Str("model", req.Model).
 			Bool("stream", req.Stream).
 			Dur("duration", time.Since(start)).
+			Int("prompt_tokens", usage.PromptTokens).
+			Int("completion_tokens", usage.CompletionTokens).
 			Msg("Request completed")
-		record(true, resp.StatusCode)
+		record(true, resp.StatusCode, usage)
 		h.pool.ReleaseProxy(ownProxy)
 		return
 	}
@@ -545,7 +558,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		h.log.Warn().
 			Str("model", req.Model).
 			Msg("Request rate limited by upstream, all fresh IPs exhausted")
-		record(false, http.StatusTooManyRequests)
+		record(false, http.StatusTooManyRequests, upstream.Usage{})
 		return
 	}
 
@@ -555,11 +568,11 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		Str("model", req.Model).
 		Err(lastErr).
 		Msg("Request failed")
-	record(false, http.StatusBadGateway)
+	record(false, http.StatusBadGateway, upstream.Usage{})
 }
 
 // handleStreamResponse handles streaming (SSE) responses
-func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Response, proxy *proxy.Proxy) {
+func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Response, proxy *proxy.Proxy) upstream.Usage {
 	defer resp.Body.Close()
 
 	// Set SSE headers
@@ -571,9 +584,10 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.writeError(w, http.StatusInternalServerError, "Streaming not supported")
-		return
+		return upstream.Usage{}
 	}
 
+	var usage upstream.Usage
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
@@ -584,6 +598,27 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 			break
 		}
 
+		// Parse SSE data lines for usage
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			data = strings.TrimSpace(data)
+			if data == "[DONE]" {
+				// Write the line and continue to let the client process it
+				if _, err := fmt.Fprint(w, line); err != nil {
+					h.log.Warn().Err(err).Msg("Stream write error")
+					break
+				}
+				flusher.Flush()
+				continue
+			}
+			var chunk struct {
+				Usage *upstream.Usage `json:"usage,omitempty"`
+			}
+			if err := json.Unmarshal([]byte(data), &chunk); err == nil && chunk.Usage != nil {
+				usage = *chunk.Usage
+			}
+		}
+
 		// Write SSE line
 		if _, err := fmt.Fprint(w, line); err != nil {
 			h.log.Warn().Err(err).Msg("Stream write error")
@@ -591,17 +626,24 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 		}
 		flusher.Flush()
 	}
+	return usage
 }
 
 // handleNormalResponse handles non-streaming responses
-func (h *Handler) handleNormalResponse(w http.ResponseWriter, resp *http.Response) {
+func (h *Handler) handleNormalResponse(w http.ResponseWriter, resp *http.Response) upstream.Usage {
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		h.writeError(w, http.StatusBadGateway, "Failed to read upstream response")
-		return
+		return upstream.Usage{}
 	}
+
+	// Parse JSON to extract usage
+	var result struct {
+		Usage *upstream.Usage `json:"usage,omitempty"`
+	}
+	json.Unmarshal(body, &result)
 
 	// Copy headers
 	for k, v := range resp.Header {
@@ -612,6 +654,11 @@ func (h *Handler) handleNormalResponse(w http.ResponseWriter, resp *http.Respons
 
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
+
+	if result.Usage != nil {
+		return *result.Usage
+	}
+	return upstream.Usage{}
 }
 
 // handleHealth returns health status

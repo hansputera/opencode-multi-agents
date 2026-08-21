@@ -17,7 +17,18 @@ const (
 
 	// DefaultTrafficWindow is the default time window (in minutes) for the traffic series.
 	DefaultTrafficWindow = 30
+
+	// currentSchemaVersion is the latest schema version.
+	currentSchemaVersion = 2
 )
+
+// Usage holds token counts for a single request.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	CachedTokens     int `json:"prompt_tokens_cached,omitempty"`
+}
 
 // Store tracks request metrics in a SQLite database.
 type Store struct {
@@ -55,8 +66,50 @@ func New(path string) (*Store, error) {
 	return s, nil
 }
 
-// migrate creates the schema.
+// migrate creates the schema and applies migrations.
 func (s *Store) migrate() error {
+	// Create schema version table
+	_, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_version (
+			version INTEGER NOT NULL
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create schema_version table: %w", err)
+	}
+
+	// Get current version
+	var version int
+	err = s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&version)
+	if err != nil {
+		// Table might be empty, try inserting version 0
+		_, err = s.db.Exec(`INSERT OR IGNORE INTO schema_version (version) VALUES (0)`)
+		if err != nil {
+			return fmt.Errorf("failed to initialize schema version: %w", err)
+		}
+		version = 0
+	}
+
+	// Apply migrations
+	if version < 1 {
+		if err := s.migrateV1(); err != nil {
+			return fmt.Errorf("migration v1 failed: %w", err)
+		}
+		version = 1
+	}
+
+	if version < 2 {
+		if err := s.migrateV2(); err != nil {
+			return fmt.Errorf("migration v2 failed: %w", err)
+		}
+		version = 2
+	}
+
+	return nil
+}
+
+// migrateV1 creates the initial requests table.
+func (s *Store) migrateV1() error {
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS requests (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +122,29 @@ func (s *Store) migrate() error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests (timestamp);
 		CREATE INDEX IF NOT EXISTS idx_requests_model ON requests (model);
+		INSERT OR REPLACE INTO schema_version (version) VALUES (1);
+	`)
+	return err
+}
+
+// migrateV2 adds token and cost columns.
+func (s *Store) migrateV2() error {
+	// Check if columns already exist (for safety)
+	var colCount int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name='total_tokens'`).Scan(&colCount)
+	if err != nil || colCount > 0 {
+		// Column already exists or error, skip migration
+		_, _ = s.db.Exec(`INSERT OR REPLACE INTO schema_version (version) VALUES (2)`)
+		return nil
+	}
+
+	_, err = s.db.Exec(`
+		ALTER TABLE requests ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE requests ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE requests ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE requests ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE requests ADD COLUMN estimated_cost REAL NOT NULL DEFAULT 0;
+		INSERT OR REPLACE INTO schema_version (version) VALUES (2);
 	`)
 	return err
 }
@@ -86,14 +162,15 @@ func (s *Store) Prune() error {
 }
 
 // Record stores a single request metric.
-func (s *Store) Record(model string, stream, success bool, status int, latency time.Duration) error {
+func (s *Store) Record(model string, stream, success bool, status int, latency time.Duration, usage Usage, cost float64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(
-		`INSERT INTO requests (timestamp, model, stream, success, status, latency_ms) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO requests (timestamp, model, stream, success, status, latency_ms, prompt_tokens, completion_tokens, total_tokens, cached_tokens, estimated_cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, orUnknown(model), boolToInt(stream), boolToInt(success), status, latency.Milliseconds(),
+		usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, usage.CachedTokens, cost,
 	)
 	return err
 }
@@ -107,18 +184,27 @@ type TrafficPoint struct {
 
 // ModelUsage is the usage count for a single model.
 type ModelUsage struct {
-	Model    string `json:"model"`
-	Requests int    `json:"requests"`
+	Model            string  `json:"model"`
+	Requests         int     `json:"requests"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	TotalTokens      int     `json:"total_tokens"`
+	EstimatedCost    float64 `json:"estimated_cost"`
 }
 
 // Summary holds the aggregated totals.
 type Summary struct {
-	TotalRequests  int     `json:"total_requests"`
-	TotalErrors    int     `json:"total_errors"`
-	SuccessRate    float64 `json:"success_rate"`
-	AvgLatencyMS   float64 `json:"avg_latency_ms"`
-	StreamRequests int     `json:"stream_requests"`
-	UptimeSeconds  int64   `json:"uptime_seconds"`
+	TotalRequests      int     `json:"total_requests"`
+	TotalErrors        int     `json:"total_errors"`
+	SuccessRate        float64 `json:"success_rate"`
+	AvgLatencyMS       float64 `json:"avg_latency_ms"`
+	StreamRequests     int     `json:"stream_requests"`
+	UptimeSeconds      int64   `json:"uptime_seconds"`
+	TotalTokens        int64   `json:"total_tokens"`
+	TotalPromptTokens  int64   `json:"total_prompt_tokens"`
+	TotalComplTokens   int64   `json:"total_completion_tokens"`
+	TotalCachedTokens  int64   `json:"total_cached_tokens"`
+	TotalEstimatedCost float64 `json:"total_estimated_cost"`
 }
 
 // Snapshot is the full metrics payload served to the dashboard.
@@ -157,9 +243,24 @@ func (s *Store) summary(snap *Snapshot) error {
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(AVG(latency_ms), 0),
-			COALESCE(SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(total_tokens), 0),
+			COALESCE(SUM(prompt_tokens), 0),
+			COALESCE(SUM(completion_tokens), 0),
+			COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(estimated_cost), 0)
 		FROM requests
-	`).Scan(&snap.Summary.TotalRequests, &snap.Summary.TotalErrors, &avg, &snap.Summary.StreamRequests)
+	`).Scan(
+		&snap.Summary.TotalRequests,
+		&snap.Summary.TotalErrors,
+		&avg,
+		&snap.Summary.StreamRequests,
+		&snap.Summary.TotalTokens,
+		&snap.Summary.TotalPromptTokens,
+		&snap.Summary.TotalComplTokens,
+		&snap.Summary.TotalCachedTokens,
+		&snap.Summary.TotalEstimatedCost,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to load summary: %w", err)
 	}
@@ -218,7 +319,11 @@ func (s *Store) traffic(snap *Snapshot) error {
 
 func (s *Store) models(snap *Snapshot) error {
 	rows, err := s.db.Query(`
-		SELECT model, COUNT(*) AS total
+		SELECT model, COUNT(*) AS total,
+			COALESCE(SUM(prompt_tokens), 0),
+			COALESCE(SUM(completion_tokens), 0),
+			COALESCE(SUM(total_tokens), 0),
+			COALESCE(SUM(estimated_cost), 0)
 		FROM requests
 		GROUP BY model
 		ORDER BY total DESC
@@ -230,7 +335,7 @@ func (s *Store) models(snap *Snapshot) error {
 
 	for rows.Next() {
 		var m ModelUsage
-		if err := rows.Scan(&m.Model, &m.Requests); err != nil {
+		if err := rows.Scan(&m.Model, &m.Requests, &m.PromptTokens, &m.CompletionTokens, &m.TotalTokens, &m.EstimatedCost); err != nil {
 			return fmt.Errorf("failed to scan model row: %w", err)
 		}
 		snap.Models = append(snap.Models, m)

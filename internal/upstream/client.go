@@ -53,6 +53,14 @@ type Auth struct {
 	Value  string // full header value, e.g. "Bearer zent-x" or "public"
 }
 
+// Usage holds token counts from an upstream response.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	CachedTokens     int `json:"prompt_tokens_cached,omitempty"`
+}
+
 // RateLimit describes an upstream rate-limit signal. RetryAfter carries the
 // upstream's Retry-After header value ("" when absent), so the pool can ban
 // the egress IP for at least as long as the provider asked us to wait.

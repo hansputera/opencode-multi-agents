@@ -122,6 +122,7 @@ type ocChatResponse struct {
 	Created int64          `json:"created"`
 	Model   string         `json:"model"`
 	Choices []ocChoice     `json:"choices"`
+	Usage   *Usage         `json:"usage,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
