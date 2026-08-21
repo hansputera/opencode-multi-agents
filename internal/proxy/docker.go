@@ -7,7 +7,10 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,17 +29,23 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// cliImageTag is the tag of the WARP image with the opencode CLI baked in,
-// built on demand by ensureCLIImage when UPSTREAM_PROVIDER=opencode-cli.
-const cliImageTag = "opencode-multi-agents/warp-opencode:latest"
+// vpnImageTag is the tag of the ProtonVPN image with gost SOCKS5 sidecar,
+// built on demand by ensureVPNImage at startup.
+const vpnImageTag = "opencode-multi-agents/protonvpn:latest"
 
-// opencodeWarpDockerfile is embedded so the gateway can build the CLI image
+// protonwireGostDockerfile is embedded so the gateway can build the VPN image
 // at runtime without shipping Dockerfiles on disk.
 //
-//go:embed assets/opencode-warp.Dockerfile
-var opencodeWarpDockerfile string
+//go:embed assets/protonwire-gost.Dockerfile
+var protonwireGostDockerfile string
 
-// DockerManager manages WARP containers using Docker SDK
+// protonwireEntrypoint is the entrypoint script embedded alongside the
+// Dockerfile so the build context is self-contained.
+//
+//go:embed assets/protonwire-entrypoint.sh
+var protonwireEntrypoint string
+
+// DockerManager manages VPN containers using Docker SDK
 type DockerManager struct {
 	cli       *client.Client
 	cfg       *config.Config
@@ -45,8 +54,9 @@ type DockerManager struct {
 	namespace string // Container name prefix
 	imageMu   sync.Mutex
 	imageDone bool
-	cliOnce   sync.Once
-	cliErr    error
+	keyIndex  atomic.Int32
+	vpnOnce   sync.Once
+	vpnErr    error
 }
 
 // NewDockerManager creates a new Docker manager
@@ -60,7 +70,7 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 		cli:       cli,
 		cfg:       cfg,
 		log:       log,
-		namespace: "warp-gateway",
+		namespace: "protonvpn-gateway",
 	}
 	dm.nextPort.Store(int32(cfg.ProxyBasePort))
 
@@ -68,73 +78,67 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 	// the pool starts creating containers to avoid name conflicts.
 	dm.cleanupOrphans(context.Background())
 
-	// opencode-cli mode requires the baked image; build it synchronously so
-	// pool.Start creates containers from the right image.
-	if cfg.UpstreamProvider == "opencode-cli" {
-		buildCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
-		if err := dm.ensureCLIImage(buildCtx); err != nil {
-			return nil, fmt.Errorf("failed to prepare opencode CLI image: %w", err)
-		}
-		dm.cfg.WARPImage = cliImageTag
+	// Build the VPN+gost image synchronously so pool.Start can create
+	// containers immediately.
+	buildCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if err := dm.ensureVPNImage(buildCtx); err != nil {
+		return nil, fmt.Errorf("failed to prepare VPN image: %w", err)
 	}
-
-	// Pull the WARP image in the background so containers can start immediately
-	go func() {
-		pullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		if err := dm.ensureImage(pullCtx); err != nil {
-			dm.log.Error().Err(err).Str("image", cfg.WARPImage).Msg("Failed to ensure WARP image")
-		}
-	}()
 
 	return dm, nil
 }
 
-// ensureCLIImage makes sure the opencode CLI WARP image exists locally,
+// ensureVPNImage makes sure the ProtonVPN+gost image exists locally,
 // building it from the embedded Dockerfile on first use. Safe for concurrent
 // callers (sync.Once).
-func (dm *DockerManager) ensureCLIImage(ctx context.Context) error {
-	dm.cliOnce.Do(func() {
-		dm.log.Info().Str("image", cliImageTag).Msg("Ensuring opencode CLI WARP image")
+func (dm *DockerManager) ensureVPNImage(ctx context.Context) error {
+	dm.vpnOnce.Do(func() {
+		dm.log.Info().Str("image", vpnImageTag).Msg("Ensuring ProtonVPN+gost image")
 
-		if _, _, err := dm.cli.ImageInspectWithRaw(ctx, cliImageTag); err == nil {
-			dm.log.Info().Str("image", cliImageTag).Msg("opencode CLI WARP image already present")
+		if _, _, err := dm.cli.ImageInspectWithRaw(ctx, vpnImageTag); err == nil {
+			dm.log.Info().Str("image", vpnImageTag).Msg("ProtonVPN+gost image already present")
 			return
 		}
 
-		dm.log.Info().Str("image", cliImageTag).Msg("Building opencode CLI WARP image (Node 20 + opencode-ai)...")
+		dm.log.Info().Str("image", vpnImageTag).Msg("Building ProtonVPN+gost image...")
 
-		// Minimal build context: a single Dockerfile.
+		// Build context: Dockerfile + entrypoint script
 		var buf bytes.Buffer
 		tw := tar.NewWriter(&buf)
 		_ = tw.WriteHeader(&tar.Header{
-			Name: "opencode-warp.Dockerfile",
+			Name: "protonwire-gost.Dockerfile",
 			Mode: 0o644,
-			Size: int64(len(opencodeWarpDockerfile)),
+			Size: int64(len(protonwireGostDockerfile)),
 		})
-		_, _ = tw.Write([]byte(opencodeWarpDockerfile))
+		_, _ = tw.Write([]byte(protonwireGostDockerfile))
+		_ = tw.WriteHeader(&tar.Header{
+			Name: "protonwire-entrypoint.sh",
+			Mode: 0o755,
+			Size: int64(len(protonwireEntrypoint)),
+		})
+		_, _ = tw.Write([]byte(protonwireEntrypoint))
 		_ = tw.Close()
 
 		resp, err := dm.cli.ImageBuild(ctx, &buf, types.ImageBuildOptions{
-			Tags:        []string{cliImageTag},
-			Dockerfile:  "opencode-warp.Dockerfile",
+			Tags:        []string{vpnImageTag},
+			Dockerfile:  "protonwire-gost.Dockerfile",
 			Remove:      true,
 			ForceRemove: true,
 		})
 		if err != nil {
-			dm.cliErr = fmt.Errorf("opencode CLI image build failed: %w", err)
+			dm.vpnErr = fmt.Errorf("VPN image build failed: %w", err)
 			return
 		}
 		defer resp.Body.Close()
 		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			dm.cliErr = fmt.Errorf("opencode CLI image build: %w", err)
+			dm.vpnErr = fmt.Errorf("VPN image build: %w", err)
 			return
 		}
 
-		dm.log.Info().Str("image", cliImageTag).Msg("opencode CLI WARP image built")
+		dm.log.Info().Str("image", vpnImageTag).Msg("ProtonVPN+gost image built")
 	})
-	return dm.cliErr
+	return dm.vpnErr
 }
 
 // Exec runs a command inside a proxy container (docker exec) as the container's
@@ -176,7 +180,7 @@ func (dm *DockerManager) Exec(ctx context.Context, containerID string, env, args
 	return out, nil
 }
 
-// ensureImage makes sure the WARP image is present locally, pulling it if needed.
+// ensureImage makes sure the VPN image is present locally, pulling it if needed.
 func (dm *DockerManager) ensureImage(ctx context.Context) error {
 	dm.imageMu.Lock()
 	defer dm.imageMu.Unlock()
@@ -185,7 +189,7 @@ func (dm *DockerManager) ensureImage(ctx context.Context) error {
 		return nil
 	}
 
-	_, _, err := dm.cli.ImageInspectWithRaw(ctx, dm.cfg.WARPImage)
+	_, _, err := dm.cli.ImageInspectWithRaw(ctx, vpnImageTag)
 	if err == nil {
 		dm.imageDone = true
 		return nil
@@ -194,44 +198,66 @@ func (dm *DockerManager) ensureImage(ctx context.Context) error {
 		return fmt.Errorf("failed to inspect image: %w", err)
 	}
 
-	dm.log.Info().Str("image", dm.cfg.WARPImage).Msg("Pulling WARP image...")
-	reader, err := dm.cli.ImagePull(ctx, dm.cfg.WARPImage, image.PullOptions{})
+	dm.log.Info().Str("image", vpnImageTag).Msg("Pulling VPN image...")
+	reader, err := dm.cli.ImagePull(ctx, vpnImageTag, image.PullOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to pull image %s: %w", dm.cfg.WARPImage, err)
+		return fmt.Errorf("failed to pull image %s: %w", vpnImageTag, err)
 	}
 	defer reader.Close()
 
 	// Drain the pull stream to wait for completion
 	if _, err := io.Copy(io.Discard, reader); err != nil {
-		return fmt.Errorf("failed to pull image %s: %w", dm.cfg.WARPImage, err)
+		return fmt.Errorf("failed to pull image %s: %w", vpnImageTag, err)
 	}
 
-	dm.log.Info().Str("image", dm.cfg.WARPImage).Msg("WARP image pulled")
+	dm.log.Info().Str("image", vpnImageTag).Msg("VPN image pulled")
 	dm.imageDone = true
 	return nil
 }
 
-// Create creates a new WARP container
+// Create creates a new VPN container
 func (dm *DockerManager) Create(ctx context.Context) (*Proxy, error) {
-	// Make sure the WARP image is available locally first
+	return dm.CreateEx(ctx, nil)
+}
+
+// CreateEx creates a new VPN container, avoiding the given banned regions.
+func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions map[string]bool) (*Proxy, error) {
+	// Make sure the VPN image is available locally first
 	if err := dm.ensureImage(ctx); err != nil {
-		return nil, fmt.Errorf("WARP image unavailable: %w", err)
+		return nil, fmt.Errorf("VPN image unavailable: %w", err)
+	}
+
+	// Select key file (prefer unbanned regions)
+	keyFile, region, err := dm.nextKeyFile(bannedRegions)
+	if err != nil {
+		return nil, fmt.Errorf("no available key files: %w", err)
 	}
 
 	port := int(dm.nextPort.Add(1))
 	containerName := fmt.Sprintf("%s-%d", dm.namespace, port)
 
-	// Container configuration. Env must stay nil: setting it to an empty
-	// slice replaces the image's ENV (PATH, HOME, ...), which would break
-	// `docker exec opencode ...` in CLI mode.
+	// Read the private key content for the environment variable
+	keyContent, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key file %s: %w", keyFile, err)
+	}
+	privateKey := strings.TrimSpace(string(keyContent))
+
+	// Container configuration
 	containerConfig := &container.Config{
-		Image:        dm.cfg.WARPImage,
+		Image: vpnImageTag,
+		Env: []string{
+			fmt.Sprintf("PROTONVPN_SERVER=%s", dm.cfg.ProtonVPNServer),
+			fmt.Sprintf("WIREGUARD_PRIVATE_KEY=%s", privateKey),
+			"SKIP_DNS_CONFIG=1",
+		},
 		ExposedPorts: nat.PortSet{
 			"1080/tcp": struct{}{},
 		},
 		Labels: map[string]string{
-			"warp-gateway": "true",
-			"warp-port":    fmt.Sprintf("%d", port),
+			"protonvpn-gateway": "true",
+			"protonvpn-port":    fmt.Sprintf("%d", port),
+			"protonvpn-region":  region,
 		},
 	}
 
@@ -247,11 +273,11 @@ func (dm *DockerManager) Create(ctx context.Context) (*Proxy, error) {
 			Memory:     dm.parseMemoryLimit(dm.cfg.ResourceMemoryLimit),
 			MemorySwap: dm.parseMemoryLimit(dm.cfg.ResourceMemoryLimit),
 		},
-		// WARP needs NET_ADMIN to manage its TUN interface
+		// ProtonVPN needs NET_ADMIN for WireGuard interface management
 		CapAdd: []string{"NET_ADMIN"},
 		Sysctls: map[string]string{
-			"net.ipv6.conf.all.disable_ipv6": "0",
-			"net.ipv4.conf.all.src_valid_mark": "1",
+			"net.ipv4.conf.all.rp_filter":    "2",
+			"net.ipv6.conf.all.disable_ipv6": "1",
 		},
 		AutoRemove: false, // We manage removal manually
 	}
@@ -286,6 +312,8 @@ func (dm *DockerManager) Create(ctx context.Context) (*Proxy, error) {
 		State:       StateIdle,
 		CreatedAt:   time.Now(),
 		LastCheck:   time.Now(),
+		Region:      region,
+		KeyFile:     keyFile,
 	}
 
 	// Wait for container to be ready
@@ -298,10 +326,10 @@ func (dm *DockerManager) Create(ctx context.Context) (*Proxy, error) {
 	return proxy, nil
 }
 
-// waitForReady waits for the WARP container to be ready. In opencode-cli mode
-// it also verifies the opencode CLI is present inside the container.
+// waitForReady waits for the VPN container to be ready by checking the
+// SOCKS5 proxy health via the IP check endpoint.
 func (dm *DockerManager) waitForReady(ctx context.Context, proxy *Proxy) error {
-	// WARP needs time on first boot to register and establish the tunnel.
+	// VPN needs time to establish WireGuard tunnel
 	timeout := time.After(120 * time.Second)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -310,16 +338,9 @@ func (dm *DockerManager) waitForReady(ctx context.Context, proxy *Proxy) error {
 		select {
 		case <-ticker.C:
 			healthy, _ := dm.HealthCheck(ctx, proxy)
-			if !healthy {
-				continue
+			if healthy {
+				return nil
 			}
-			if dm.cfg.UpstreamProvider == "opencode-cli" {
-				if _, err := dm.Exec(ctx, proxy.ContainerID, nil, []string{"opencode", "--version"}); err != nil {
-					dm.log.Warn().Err(err).Str("proxy_id", proxy.ID).Msg("opencode CLI not ready yet")
-					continue
-				}
-			}
-			return nil
 		case <-timeout:
 			return fmt.Errorf("timeout waiting for container to be ready")
 		case <-ctx.Done():
@@ -328,7 +349,7 @@ func (dm *DockerManager) waitForReady(ctx context.Context, proxy *Proxy) error {
 	}
 }
 
-// Remove removes a WARP container
+// Remove removes a VPN container
 func (dm *DockerManager) Remove(ctx context.Context, containerID string) error {
 	if containerID == "" {
 		return nil
@@ -348,11 +369,11 @@ func (dm *DockerManager) Remove(ctx context.Context, containerID string) error {
 	return nil
 }
 
-// HealthCheck checks if the WARP container is healthy by tracing
-// through its SOCKS5 proxy and verifying WARP is enabled.
+// HealthCheck checks if the VPN container is healthy by tracing
+// through its SOCKS5 proxy and verifying the egress IP is reachable.
 func (dm *DockerManager) HealthCheck(ctx context.Context, p *Proxy) (bool, error) {
 	// Dial through the container's SOCKS5 proxy so the trace reflects
-	// the WARP container's egress, not the gateway host's.
+	// the VPN container's egress, not the gateway host's.
 	addr := strings.TrimPrefix(p.SOCKS5Addr, "socks5://")
 	dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
 	if err != nil {
@@ -365,8 +386,12 @@ func (dm *DockerManager) HealthCheck(ctx context.Context, p *Proxy) (bool, error
 		Timeout:   15 * time.Second,
 	}
 
-	// Check via cloudflare trace endpoint
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://cloudflare.com/cdn-cgi/trace", nil)
+	// Check via IP check endpoint
+	checkURL := dm.cfg.ProtonVPNIPCheckURL
+	if checkURL == "" {
+		checkURL = "https://icanhazip.com/"
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
 	if err != nil {
 		return false, err
 	}
@@ -382,31 +407,19 @@ func (dm *DockerManager) HealthCheck(ctx context.Context, p *Proxy) (bool, error
 		return false, err
 	}
 
-	// Check for warp=on in response
-	trace := string(body)
-	p.EgressIP = egressIPFromTrace(trace)
-	if strings.Contains(trace, "warp=on") {
-		return true, nil
+	ip := strings.TrimSpace(string(body))
+	if net.ParseIP(ip) == nil {
+		return false, fmt.Errorf("invalid IP response: %s", ip)
 	}
 
-	return false, fmt.Errorf("WARP not enabled")
-}
-
-// egressIPFromTrace extracts the public egress IP ("ip=" line) from a
-// cloudflare cdn-cgi/trace response.
-func egressIPFromTrace(trace string) string {
-	for _, line := range strings.Split(trace, "\n") {
-		if strings.HasPrefix(line, "ip=") {
-			return strings.TrimPrefix(line, "ip=")
-		}
-	}
-	return ""
+	p.EgressIP = ip
+	return true, nil
 }
 
 // cleanupOrphans removes containers from previous runs
 func (dm *DockerManager) cleanupOrphans(ctx context.Context) {
 	filter := filters.NewArgs()
-	filter.Add("label", "warp-gateway=true")
+	filter.Add("label", "protonvpn-gateway=true")
 
 	containers, err := dm.cli.ContainerList(ctx, container.ListOptions{
 		All:     true,
@@ -432,6 +445,64 @@ func (dm *DockerManager) cleanupOrphans(ctx context.Context) {
 // Close closes the Docker client
 func (dm *DockerManager) Close() error {
 	return dm.cli.Close()
+}
+
+// nextKeyFile selects the next key file from the configured directory,
+// preferring regions that are not currently banned.
+func (dm *DockerManager) nextKeyFile(bannedRegions map[string]bool) (string, string, error) {
+	if dm.cfg.ProtonVPNPrivateKeyDir == "" {
+		return "", "", fmt.Errorf("PROTONVPN_PRIVATE_KEY_DIR is not configured")
+	}
+
+	files, err := os.ReadDir(dm.cfg.ProtonVPNPrivateKeyDir)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read key directory: %w", err)
+	}
+
+	// Collect key files and their regions
+	type keyEntry struct {
+		path   string
+		region string
+	}
+	var allKeys []keyEntry
+	var availableKeys []keyEntry
+
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".key") {
+			continue
+		}
+		region := strings.TrimSuffix(f.Name(), ".key")
+		entry := keyEntry{
+			path:   filepath.Join(dm.cfg.ProtonVPNPrivateKeyDir, f.Name()),
+			region: region,
+		}
+		allKeys = append(allKeys, entry)
+		if bannedRegions == nil || !bannedRegions[region] {
+			availableKeys = append(availableKeys, entry)
+		}
+	}
+
+	if len(allKeys) == 0 {
+		return "", "", fmt.Errorf("no .key files found in %s", dm.cfg.ProtonVPNPrivateKeyDir)
+	}
+
+	// Prefer unbanned regions, fallback to all if all banned
+	keys := availableKeys
+	if len(keys) == 0 {
+		dm.log.Warn().Msg("All regions banned, using any available key")
+		keys = allKeys
+	}
+
+	// Round-robin selection
+	idx := int(dm.keyIndex.Add(1)-1) % len(keys)
+	selected := keys[idx]
+
+	dm.log.Debug().
+		Str("region", selected.region).
+		Str("key_file", filepath.Base(selected.path)).
+		Msg("Selected VPN key")
+
+	return selected.path, selected.region, nil
 }
 
 // parseCPUQuota parses CPU limit string to quota

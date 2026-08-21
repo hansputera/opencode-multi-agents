@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hansputera/opencode-multi-agents/internal/config"
 	"github.com/hansputera/opencode-multi-agents/internal/metrics"
 	"github.com/hansputera/opencode-multi-agents/internal/proxy"
@@ -25,6 +26,7 @@ type Handler struct {
 	pool    *proxy.PoolManager
 	client  upstream.Upstream
 	metrics *metrics.Store
+	prometheus *metrics.PrometheusExporter
 	log     *zerolog.Logger
 	mux     *http.ServeMux
 }
@@ -40,11 +42,15 @@ func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Stor
 	default:
 		client = upstream.NewClient(cfg, log)
 	}
+
+	prometheus := metrics.NewPrometheusExporter(metricsStore)
+
 	h := &Handler{
 		cfg:     cfg,
 		pool:    pool,
 		client:  client,
 		metrics: metricsStore,
+		prometheus: prometheus,
 		log:     log,
 		mux:     http.NewServeMux(),
 	}
@@ -55,12 +61,13 @@ func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Stor
 	h.mux.HandleFunc("GET /health", h.handleHealth)
 	h.mux.HandleFunc("GET /stats", h.handleStats)
 	h.mux.HandleFunc("GET /api/metrics", h.handleMetrics)
+	h.mux.HandleFunc("GET /metrics", prometheus.Handler())
 
 	// Serve the web UI
 	h.mux.Handle("/", web.Handler())
 
 	// Middleware
-	return h.loggingMiddleware(h.corsMiddleware(h.mux))
+	return h.loggingMiddleware(h.requestIDMiddleware(h.corsMiddleware(h.mux)))
 }
 
 // loggingMiddleware logs all requests
@@ -74,19 +81,30 @@ func (h *Handler) loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r)
 
 		duration := time.Since(start)
-		h.log.Info().
+		reqID := GetRequestID(r.Context())
+
+		event := h.log.Info().
 			Str("method", r.Method).
 			Str("path", r.URL.Path).
 			Int("status", rw.statusCode).
-			Dur("duration", duration).
-			Msg("Request")
+			Dur("duration", duration)
+
+		if reqID != "" {
+			event = event.Str("request_id", reqID)
+		}
+
+		event.Msg("Request")
 	})
 }
 
 // corsMiddleware adds CORS headers
 func (h *Handler) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := h.cfg.CORSOrigin
+		if origin == "" {
+			origin = "*"
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
@@ -97,6 +115,34 @@ func (h *Handler) corsMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// requestIDMiddleware generates a unique request ID and adds it to the context
+func (h *Handler) requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Use existing X-Request-ID header if provided by client
+		reqID := r.Header.Get("X-Request-ID")
+		if reqID == "" {
+			reqID = uuid.New().String()
+		}
+
+		// Add request ID to context
+		ctx := context.WithValue(r.Context(), "request_id", reqID)
+		r = r.WithContext(ctx)
+
+		// Add request ID to response header
+		w.Header().Set("X-Request-ID", reqID)
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// GetRequestID extracts request ID from context
+func GetRequestID(ctx context.Context) string {
+	if id, ok := ctx.Value("request_id").(string); ok {
+		return id
+	}
+	return ""
 }
 
 // resolveAuth picks the upstream auth header per request:
@@ -139,7 +185,7 @@ func authForEntry(entry string) upstream.Auth {
 
 // isPublicTier reports whether auth selects OpenCode Zen's shared public tier
 // (the "public" / "public..." account). The public tier is rate limited by
-// account identity, not by egress IP, so rotating WARP containers cannot reset
+// account identity, not by egress IP, so rotating VPN containers cannot reset
 // a 429 — callers should short-circuit and return 429+Retry-After instead of
 // churning fresh proxies in a retry loop.
 func isPublicTier(auth upstream.Auth) bool {
@@ -178,7 +224,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	// Forward with retry. On an upstream rate limit we ban the proxy's egress
 	// IP and wait (bounded by RateLimitFreshIPWait) for a fresh, unbanned
-	// proxy whose new WARP container has booted, rather than immediately
+	// proxy whose new VPN container has booted, rather than immediately
 	// returning 429 to the client.
 	var lastErr error
 	var rateLimited bool
@@ -218,7 +264,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		if rl != nil {
 			h.pool.MarkRateLimited(proxy, rl.RetryAfter, isPublicTier(auth))
 			// Public tier is rate limited by account identity, not by egress IP:
-			// spinning a fresh WARP container cannot reset it, so return an
+			// spinning a fresh VPN container cannot reset it, so return an
 			// honest 429+Retry-After instead of churning the pool.
 			if isPublicTier(auth) {
 				w.Header().Set("Retry-After", retryAfterHeader(rl, h.cfg.RateLimitRetryAfter))
@@ -321,17 +367,30 @@ func filterModels(body []byte, pattern string) ([]byte, bool) {
 	return out, true
 }
 
+const (
+	// maxRequestBodySize limits the maximum size of incoming request bodies
+	// to prevent DoS attacks via large payloads. Default is 10MB.
+	maxRequestBodySize = 10 * 1024 * 1024
+)
+
 // handleChatCompletions handles chat completion requests
 func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
+	// Limit request body size to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
 	// Read request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		h.writeError(w, http.StatusBadRequest, "Failed to read request body")
+		if err.Error() == "http: request body too large" {
+			h.writeError(w, http.StatusRequestEntityTooLarge, "Request body too large")
+		} else {
+			h.writeError(w, http.StatusBadRequest, "Failed to read request body")
+		}
 		return
 	}
-	r.Body.Close()
+	defer r.Body.Close()
 
 	// Parse request to check for streaming
 	var req struct {
@@ -355,7 +414,11 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err := h.metrics.Record(req.Model, req.Stream, success, status, time.Since(start)); err != nil {
-			h.log.Debug().Err(err).Msg("Failed to record metrics")
+			h.log.Warn().Err(err).Msg("Failed to record metrics")
+		}
+		// Record to Prometheus exporter
+		if h.prometheus != nil {
+			h.prometheus.RecordRequest(success)
 		}
 	}
 
@@ -428,7 +491,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		if rl != nil {
 			h.pool.MarkRateLimited(proxy, rl.RetryAfter, isPublicTier(auth))
 			// Public tier is rate limited by account identity, not by egress IP:
-			// spinning a fresh WARP container cannot reset it, so return an
+			// spinning a fresh VPN container cannot reset it, so return an
 			// honest 429+Retry-After immediately instead of churning the pool.
 			if isPublicTier(auth) {
 				w.Header().Set("Retry-After", retryAfterHeader(rl, h.cfg.RateLimitRetryAfter))
@@ -486,7 +549,8 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	h.writeError(w, http.StatusBadGateway, fmt.Sprintf("Request failed: %v", lastErr))
+	// Sanitize error message - don't leak internal details to clients
+	h.writeError(w, http.StatusBadGateway, "Request failed: upstream error")
 	h.log.Error().
 		Str("model", req.Model).
 		Err(lastErr).
@@ -515,14 +579,14 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
-				h.log.Debug().Err(err).Msg("Stream read error")
+				h.log.Warn().Err(err).Msg("Stream read error")
 			}
 			break
 		}
 
 		// Write SSE line
 		if _, err := fmt.Fprint(w, line); err != nil {
-			h.log.Debug().Err(err).Msg("Stream write error")
+			h.log.Warn().Err(err).Msg("Stream write error")
 			break
 		}
 		flusher.Flush()
@@ -575,9 +639,15 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // handleMetrics returns the pooled metrics snapshot plus proxy pool statistics
 func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	proxies := h.pool.List()
+	snapshots := make([]proxy.ProxySnapshot, len(proxies))
+	for i, p := range proxies {
+		snapshots[i] = p.Snapshot()
+	}
+
 	resp := map[string]interface{}{
 		"pool":    h.pool.Stats(),
-		"proxies": h.pool.List(),
+		"proxies": snapshots,
 	}
 
 	if h.metrics != nil {

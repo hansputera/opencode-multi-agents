@@ -43,3 +43,6 @@ data/
 
 # Docker
 docker-compose.override.yml
+
+# ProtonVPN keys
+protonvpn-keys/

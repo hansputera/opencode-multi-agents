@@ -20,7 +20,7 @@ test:
 clean:
 	@echo "Cleaning..."
 	@rm -rf bin/
-	@docker ps -a | grep warp-gateway | awk '{print $$1}' | xargs -r docker rm -f
+	@docker ps -a | grep protonvpn-gateway | awk '{print $$1}' | xargs -r docker rm -f
 	@echo "Clean complete"
 
 # Build Docker image
@@ -52,7 +52,7 @@ health:
 stats:
 	@curl -s http://localhost:${GATEWAY_PORT:-8082}/stats | jq
 
-# Verify each WARP container egresses from a unique public IP
+# Verify each VPN container egresses from a public IP
 check-ips:
 	@bash scripts/check-ips.sh
 

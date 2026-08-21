@@ -33,6 +33,10 @@ type fakeManager struct {
 }
 
 func (f *fakeManager) Create(ctx context.Context) (*proxy.Proxy, error) {
+	return f.CreateEx(ctx, nil)
+}
+
+func (f *fakeManager) CreateEx(ctx context.Context, bannedRegions map[string]bool) (*proxy.Proxy, error) {
 	if len(f.proxies) > 0 {
 		p := f.proxies[0]
 		f.proxies = f.proxies[1:]
@@ -44,6 +48,7 @@ func (f *fakeManager) Create(ctx context.Context) (*proxy.Proxy, error) {
 		ID:         fmt.Sprintf("synthetic-%d", f.counter),
 		SOCKS5Addr: f.addr,
 		State:      proxy.StateIdle,
+		Region:     "test-region",
 	}, nil
 }
 
@@ -507,7 +512,7 @@ func TestPublicTierRateLimitShortCircuits(t *testing.T) {
 	}
 }
 // Run with: ZEN_LIVE=1 go test ./internal/handler/ -run TestZenLiveModels -v
-// Uses a local SOCKS5 proxy (no WARP containers required).
+// Uses a local SOCKS5 proxy (no VPN containers required).
 func TestZenLiveModels(t *testing.T) {
 	if os.Getenv("ZEN_LIVE") != "1" {
 		t.Skip("set ZEN_LIVE=1 to run the live Zen integration test")
@@ -561,7 +566,7 @@ func TestZenLiveModels(t *testing.T) {
 }
 
 // TestOpenCodeModeRelay verifies that in "opencode" upstream mode a chat
-// request is proxied through a WARP container to an OpenCode Server, which
+// request is proxied through a VPN container to an OpenCode Server, which
 // returns a session id + an assistant message that the gateway re-emits as an
 // OpenAI-shaped stream (SSE) / non-stream response.
 func TestOpenCodeModeRelay(t *testing.T) {

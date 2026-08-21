@@ -90,6 +90,8 @@ func TestProxyFields(t *testing.T) {
 		RequestsSent: 10,
 		ErrorCount:   2,
 		CreatedAt:    now,
+		Region:       "nl-01",
+		KeyFile:      "/path/to/nl-01.key",
 	}
 
 	if proxy.ID != "test-123" {
@@ -103,75 +105,24 @@ func TestProxyFields(t *testing.T) {
 	if proxy.RequestsSent != 10 {
 		t.Errorf("RequestsSent = %d, want 10", proxy.RequestsSent)
 	}
-}
 
-func TestEgressIPFromTrace(t *testing.T) {
-	tests := []struct {
-		name  string
-		trace string
-		want  string
-	}{
-		{
-			name:  "warp trace with ip",
-			trace: "ip=2a09:bac5::123\nwarp=on\nloc=US\n",
-			want:  "2a09:bac5::123",
-		},
-		{
-			name:  "no ip line",
-			trace: "warp=on\nloc=US\n",
-			want:  "",
-		},
-		{
-			name:  "empty trace",
-			trace: "",
-			want:  "",
-		},
-		{
-			name:  "ip not at line start",
-			trace: "x-ip=9.9.9.9\nwarp=on\n",
-			want:  "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := egressIPFromTrace(tt.trace); got != tt.want {
-				t.Errorf("egressIPFromTrace() = %q, want %q", got, tt.want)
-			}
-		})
+	if proxy.Region != "nl-01" {
+		t.Errorf("Region = %s, want nl-01", proxy.Region)
 	}
 }
 
-func TestPoolHasIP(t *testing.T) {
-	pm := &PoolManager{
-		pool: map[string]*Proxy{
-			"a": {EgressIP: "1.1.1.1", State: StateIdle},
-			"b": {EgressIP: "2.2.2.2", State: StateIdle},
-			"c": {EgressIP: "3.3.3.3", State: StateUnhealthy},
-			"d": {EgressIP: "4.4.4.4", State: StateCooldown},
-		},
-	}
+func TestBannedRegions(t *testing.T) {
+	pm := newTestPool()
+	pm.regionBans["nl-01"] = time.Now().Add(5 * time.Minute)
+	pm.regionBans["de-01"] = time.Now().Add(-1 * time.Minute) // expired
 
-	if !pm.poolHasIP("x", "1.1.1.1") {
-		t.Error("poolHasIP() = false for IP used by healthy proxy a, want true")
+	banned := pm.bannedRegions()
+
+	if !banned["nl-01"] {
+		t.Error("bannedRegions() = false for nl-01, want true")
 	}
-	if !pm.poolHasIP("x", "2.2.2.2") {
-		t.Error("poolHasIP() = false for IP used by healthy proxy b, want true")
-	}
-	// All states (including unhealthy, which may recover) count so that a
-	// replacement container is never assigned an IP already in use by any
-	// member of the pool.
-	if !pm.poolHasIP("x", "3.3.3.3") {
-		t.Error("poolHasIP() = false for IP used by unhealthy proxy c, want true")
-	}
-	if !pm.poolHasIP("x", "4.4.4.4") {
-		t.Error("poolHasIP() = false for IP used by cooldown proxy d, want true")
-	}
-	if pm.poolHasIP("x", "9.9.9.9") {
-		t.Error("poolHasIP() = true for unused IP, want false")
-	}
-	if pm.poolHasIP("a", "1.1.1.1") {
-		t.Error("poolHasIP() = true for own IP only (same proxy id), want false")
+	if banned["de-01"] {
+		t.Error("bannedRegions() = true for expired de-01, want false")
 	}
 }
 
@@ -180,10 +131,11 @@ func TestPoolHasIP(t *testing.T) {
 func newTestPool() *PoolManager {
 	log := zerolog.Nop()
 	return &PoolManager{
-		cfg:    config.DefaultConfig(),
-		log:    &log,
-		pool:   make(map[string]*Proxy),
-		ipBans: make(map[string]time.Time),
+		cfg:        config.DefaultConfig(),
+		log:        &log,
+		pool:       make(map[string]*Proxy),
+		ipBans:     make(map[string]time.Time),
+		regionBans: make(map[string]time.Time),
 	}
 }
 
@@ -256,12 +208,17 @@ type stubManager struct {
 }
 
 func (s *stubManager) Create(ctx context.Context) (*Proxy, error) {
+	return s.CreateEx(ctx, nil)
+}
+
+func (s *stubManager) CreateEx(ctx context.Context, bannedRegions map[string]bool) (*Proxy, error) {
 	n := atomic.AddInt32(&s.createCount, 1)
 	return &Proxy{
 		ID:         fmt.Sprintf("stub-%d", n),
 		SOCKS5Addr: "socks5://127.0.0.1:9999",
 		State:      StateIdle,
 		EgressIP:   fmt.Sprintf("10.0.0.%d", n+100),
+		Region:     "test-region",
 	}, nil
 }
 

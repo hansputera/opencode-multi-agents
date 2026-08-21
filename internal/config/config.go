@@ -21,9 +21,9 @@ type Config struct {
 	UpstreamAPIKey  string `yaml:"upstream_api_key" env:"UPSTREAM_API_KEY"`
 	// UpstreamProvider selects the upstream driver: "zen" (default, OpenAI
 	// compatible), "opencode" (OpenCode Server HTTP API) or "opencode-cli"
-	// (the opencode CLI baked into each WARP container, exec'd per request).
+	// (the opencode CLI baked into each VPN container, exec'd per request).
 	// In "opencode" and "opencode-cli" mode each request runs inside a fresh
-	// WARP container so the agent's egress IP is unique per request.
+	// VPN container so the agent's egress IP is unique per request.
 	UpstreamProvider string `yaml:"upstream_provider" env:"UPSTREAM_PROVIDER"`
 	// OpenCodeServerURL is the base URL of a running `opencode serve` instance
 	// (default http://127.0.0.1:4096). Tunnelled through each proxy container.
@@ -50,13 +50,18 @@ type Config struct {
 	OpenCodeCLIModels      []string `yaml:"opencode_cli_models" env:"OPENCODE_CLI_MODELS"`
 
 	// Proxy pool configuration
-	ProxyPoolSize      int           `yaml:"proxy_pool_size" env:"PROXY_POOL_SIZE"`
-	ProxyBasePort      int           `yaml:"proxy_base_port" env:"PROXY_BASE_PORT"`
-	WARPImage          string        `yaml:"warp_image" env:"WARP_IMAGE"`
-	CooldownDuration   time.Duration `yaml:"cooldown_duration" env:"RATE_LIMIT_COOLDOWN"`
-	HealthCheckPeriod  time.Duration `yaml:"health_check_period" env:"HEALTH_CHECK_PERIOD"`
-	ResourceCPULimit   string        `yaml:"resource_cpu_limit" env:"RESOURCE_CPU_LIMIT"`
-	ResourceMemoryLimit string       `yaml:"resource_memory_limit" env:"RESOURCE_MEMORY_LIMIT"`
+	ProxyPoolSize       int           `yaml:"proxy_pool_size" env:"PROXY_POOL_SIZE"`
+	ProxyBasePort       int           `yaml:"proxy_base_port" env:"PROXY_BASE_PORT"`
+	VPNImage            string        `yaml:"vpn_image" env:"VPN_IMAGE"`
+	CooldownDuration    time.Duration `yaml:"cooldown_duration" env:"RATE_LIMIT_COOLDOWN"`
+	HealthCheckPeriod   time.Duration `yaml:"health_check_period" env:"HEALTH_CHECK_PERIOD"`
+	ResourceCPULimit    string        `yaml:"resource_cpu_limit" env:"RESOURCE_CPU_LIMIT"`
+	ResourceMemoryLimit string        `yaml:"resource_memory_limit" env:"RESOURCE_MEMORY_LIMIT"`
+
+	// ProtonVPN configuration
+	ProtonVPNPrivateKeyDir string `yaml:"protonvpn_private_key_dir" env:"PROTONVPN_PRIVATE_KEY_DIR"`
+	ProtonVPNServer        string `yaml:"protonvpn_server" env:"PROTONVPN_SERVER"`
+	ProtonVPNIPCheckURL    string `yaml:"protonvpn_ip_check_url" env:"PROTONVPN_IP_CHECK_URL"`
 
 	// Retry configuration
 	MaxRetries         int           `yaml:"max_retries" env:"MAX_RETRIES"`
@@ -73,7 +78,7 @@ type Config struct {
 	IPBanDuration time.Duration `yaml:"ip_ban_duration" env:"IP_BAN_DURATION"`
 
 	// How long the gateway waits for a fresh (unbanned) proxy on an upstream
-	// 429 before giving up with 429 + Retry-After. Covers WARP container boot.
+	// 429 before giving up with 429 + Retry-After. Covers VPN container boot.
 	RateLimitFreshIPWait time.Duration `yaml:"rate_limit_fresh_ip_wait" env:"RATE_LIMIT_FRESH_IP_WAIT"`
 
 	// Concurrency
@@ -81,6 +86,9 @@ type Config struct {
 
 	// Sticky session
 	StickySessionTTL   time.Duration `yaml:"sticky_session_ttl" env:"STICKY_SESSION_TTL"`
+
+	// CORS
+	CORSOrigin string `yaml:"cors_origin" env:"CORS_ORIGIN"`
 
 	// Logging
 	LogLevel  string `yaml:"log_level" env:"LOG_LEVEL"`
@@ -115,7 +123,9 @@ func DefaultConfig() *Config {
 		OpenCodeCLIProviderEnv: "ANTHROPIC_API_KEY",
 		ProxyPoolSize:       3,
 		ProxyBasePort:       10801,
-		WARPImage:           "caomingjun/warp:latest",
+		VPNImage:            "ghcr.io/tprasadtp/protonwire:latest",
+		ProtonVPNServer:     "node-nl-01.protonvpn.net",
+		ProtonVPNIPCheckURL: "https://icanhazip.com/",
 		CooldownDuration:    5 * time.Minute,
 		HealthCheckPeriod:   30 * time.Second,
 		ResourceCPULimit:    "0.25",
@@ -128,6 +138,7 @@ func DefaultConfig() *Config {
 		RateLimitFreshIPWait: 90 * time.Second,
 		MaxConcurrent:       100,
 		StickySessionTTL:    10 * time.Minute,
+		CORSOrigin:          "*",
 		LogLevel:            "info",
 		LogFormat:           "json",
 		RequestTimeout:      60 * time.Second,
@@ -229,7 +240,19 @@ func (c *Config) applyEnvOverrides() {
 		}
 	}
 	if v := os.Getenv("WARP_IMAGE"); v != "" {
-		c.WARPImage = v
+		c.VPNImage = v
+	}
+	if v := os.Getenv("VPN_IMAGE"); v != "" {
+		c.VPNImage = v
+	}
+	if v := os.Getenv("PROTONVPN_PRIVATE_KEY_DIR"); v != "" {
+		c.ProtonVPNPrivateKeyDir = v
+	}
+	if v := os.Getenv("PROTONVPN_SERVER"); v != "" {
+		c.ProtonVPNServer = v
+	}
+	if v := os.Getenv("PROTONVPN_IP_CHECK_URL"); v != "" {
+		c.ProtonVPNIPCheckURL = v
 	}
 	if v := os.Getenv("RATE_LIMIT_COOLDOWN"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -279,6 +302,9 @@ func (c *Config) applyEnvOverrides() {
 			c.StickySessionTTL = d
 		}
 	}
+	if v := os.Getenv("CORS_ORIGIN"); v != "" {
+		c.CORSOrigin = v
+	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		c.LogLevel = v
 	}
@@ -306,21 +332,68 @@ func (c *Config) Validate() error {
 	if c.ProxyPoolSize > 20 {
 		return fmt.Errorf("PROXY_POOL_SIZE cannot exceed 20")
 	}
+	if c.ProxyBasePort < 1024 || c.ProxyBasePort > 65535 {
+		return fmt.Errorf("PROXY_BASE_PORT must be between 1024 and 65535")
+	}
+	if c.ProtonVPNPrivateKeyDir == "" {
+		return fmt.Errorf("PROTONVPN_PRIVATE_KEY_DIR is required")
+	}
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("MAX_RETRIES cannot be negative")
 	}
 	if c.MaxRetries > 10 {
 		return fmt.Errorf("MAX_RETRIES cannot exceed 10")
 	}
+	if c.MaxConcurrent < 1 {
+		return fmt.Errorf("MAX_CONCURRENT must be at least 1")
+	}
+	if c.MaxConcurrent > 10000 {
+		return fmt.Errorf("MAX_CONCURRENT cannot exceed 10000")
+	}
 	if c.RequestTimeout < 1*time.Second {
 		return fmt.Errorf("REQUEST_TIMEOUT must be at least 1s")
 	}
-	if c.LogLevel != "debug" && c.LogLevel != "info" && c.LogLevel != "warn" && c.LogLevel != "error" {
-		c.LogLevel = "info" // Default to info if invalid
+	if c.HealthCheckPeriod < 5*time.Second {
+		return fmt.Errorf("HEALTH_CHECK_PERIOD must be at least 5s")
 	}
-	c.LogFormat = strings.ToLower(c.LogFormat)
-	if c.LogFormat != "json" && c.LogFormat != "console" {
-		c.LogFormat = "json" // Default to json if invalid
+	if c.CooldownDuration < 1*time.Minute {
+		return fmt.Errorf("RATE_LIMIT_COOLDOWN must be at least 1m")
+	}
+	if c.IPBanDuration < 1*time.Minute {
+		return fmt.Errorf("IP_BAN_DURATION must be at least 1m")
+	}
+	if c.RateLimitFreshIPWait < 10*time.Second {
+		return fmt.Errorf("RATE_LIMIT_FRESH_IP_WAIT must be at least 10s")
+	}
+	if c.RetryBaseDelay > c.RetryMaxDelay {
+		return fmt.Errorf("RETRY_BASE_DELAY must be less than RETRY_MAX_DELAY")
+	}
+	// Validate upstream provider
+	switch c.UpstreamProvider {
+	case "zen", "opencode", "opencode-cli":
+		// valid
+	case "":
+		c.UpstreamProvider = "zen" // default
+	default:
+		return fmt.Errorf("UPSTREAM_PROVIDER must be one of: zen, opencode, opencode-cli")
+	}
+	// Validate log level
+	switch c.LogLevel {
+	case "debug", "info", "warn", "error":
+		// valid
+	case "":
+		c.LogLevel = "info" // default
+	default:
+		return fmt.Errorf("LOG_LEVEL must be one of: debug, info, warn, error")
+	}
+	// Validate log format
+	switch c.LogFormat {
+	case "json", "console":
+		// valid
+	case "":
+		c.LogFormat = "json" // default
+	default:
+		return fmt.Errorf("LOG_FORMAT must be one of: json, console")
 	}
 
 	return nil

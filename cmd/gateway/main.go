@@ -38,7 +38,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start proxy pool population in the background: a fresh WARP container
+	// Start proxy pool population in the background: a fresh VPN container
 	// can take tens of seconds to boot, so the pool fills up asynchronously
 	// while the HTTP server below is already accepting connections. Starting
 	// the server only after the whole pool is ready would leave the gateway

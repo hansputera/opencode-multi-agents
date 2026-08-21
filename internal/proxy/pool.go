@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hansputera/opencode-multi-agents/internal/config"
@@ -17,7 +18,7 @@ var (
 	ErrPoolClosed       = errors.New("pool is closed")
 )
 
-// PoolManager manages a pool of WARP proxy containers
+// PoolManager manages a pool of VPN proxy containers
 type PoolManager struct {
 	cfg    *config.Config
 	log    *zerolog.Logger
@@ -30,6 +31,11 @@ type PoolManager struct {
 	// selection (upstream rate limited them). Guarded by mu.
 	ipBans map[string]time.Time
 
+	// regionBans maps VPN regions to the time until which they are excluded.
+	// When a region is rate-limited, all its IPs are banned and new containers
+	// are created from a different region. Guarded by mu.
+	regionBans map[string]time.Time
+
 	// spawning counts replacement containers currently being created by
 	// ensurePoolCapacity (guarded by mu) so concurrent triggers never spawn
 	// more than the deficit.
@@ -39,9 +45,9 @@ type PoolManager struct {
 	available chan struct{}
 	done      chan struct{}
 
-	// Metrics
-	totalRequests int
-	totalErrors   int
+	// Metrics (atomic for lock-free reads)
+	totalRequests atomic.Int64
+	totalErrors   atomic.Int64
 }
 
 // NewPoolManager creates a new proxy pool manager
@@ -56,14 +62,15 @@ func NewPoolManager(cfg *config.Config, log *zerolog.Logger) (*PoolManager, erro
 // NewPoolManagerWithManager creates a proxy pool manager with a custom manager
 func NewPoolManagerWithManager(mgr Manager, cfg *config.Config, log *zerolog.Logger) *PoolManager {
 	return &PoolManager{
-		cfg:       cfg,
-		log:       log,
-		mgr:       mgr,
-		pool:      make(map[string]*Proxy),
-		sticky:    make(map[string]string),
-		ipBans:    make(map[string]time.Time),
-		available: make(chan struct{}, cfg.ProxyPoolSize),
-		done:      make(chan struct{}),
+		cfg:        cfg,
+		log:        log,
+		mgr:        mgr,
+		pool:       make(map[string]*Proxy),
+		sticky:     make(map[string]string),
+		ipBans:     make(map[string]time.Time),
+		regionBans: make(map[string]time.Time),
+		available:  make(chan struct{}, cfg.ProxyPoolSize),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -71,7 +78,7 @@ func NewPoolManagerWithManager(mgr Manager, cfg *config.Config, log *zerolog.Log
 func (pm *PoolManager) Start(ctx context.Context) error {
 	pm.log.Info().Int("pool_size", pm.cfg.ProxyPoolSize).Msg("Starting proxy pool")
 
-	// Create proxies concurrently: a single WARP first-boot can take tens of
+	// Create proxies concurrently: a single VPN first-boot can take tens of
 	// seconds (plus retry backoffs on failure), so creating them sequentially
 	// would keep the pool empty for minutes. The Docker manager is safe for
 	// concurrent use (atomic port allocator, mutex-guarded image ensure).
@@ -100,7 +107,7 @@ func (pm *PoolManager) Start(ctx context.Context) error {
 }
 
 // createProxy creates a new proxy container and adds it to the pool, retrying
-// transient failures (e.g. slow WARP first-boot) with a short backoff.
+// transient failures (e.g. slow VPN first-boot) with a short backoff.
 func (pm *PoolManager) createProxy(ctx context.Context) error {
 	const maxAttempts = 3
 	var lastErr error
@@ -115,26 +122,13 @@ func (pm *PoolManager) createProxy(ctx context.Context) error {
 			}
 		}
 
-		proxy, err := pm.mgr.Create(ctx)
+		// Get currently banned regions to avoid them
+		banned := pm.bannedRegions()
+
+		proxy, err := pm.mgr.CreateEx(ctx, banned)
 		if err != nil {
 			lastErr = err
 			pm.log.Error().Err(err).Int("attempt", attempt).Msg("Proxy creation failed")
-			continue
-		}
-
-		// Enforce unique egress IPs: every proxy must egress from a public IP
-		// that no other proxy in the pool already uses, and never one that is
-		// currently banned (upstream rate limited). Otherwise a replacement
-		// would inherit the exact IP we are trying to rotate away from.
-		if proxy.EgressIP != "" && (pm.poolHasIP(proxy.ID, proxy.EgressIP) || pm.ipBanned(proxy.EgressIP)) {
-			pm.log.Warn().
-				Str("id", proxy.ID).
-				Str("ip", proxy.EgressIP).
-				Msg("Duplicate egress IP detected, recreating proxy")
-			if err := pm.mgr.Remove(ctx, proxy.ContainerID); err != nil {
-				pm.log.Error().Err(err).Str("container_id", proxy.ContainerID).Msg("Failed to remove duplicate container")
-			}
-			lastErr = fmt.Errorf("duplicate egress IP %s", proxy.EgressIP)
 			continue
 		}
 
@@ -149,6 +143,7 @@ func (pm *PoolManager) createProxy(ctx context.Context) error {
 		pm.log.Info().
 			Str("id", proxy.ID).
 			Str("socks5", proxy.SOCKS5Addr).
+			Str("region", proxy.Region).
 			Msg("Created new proxy container")
 
 		// Signal availability
@@ -161,6 +156,23 @@ func (pm *PoolManager) createProxy(ctx context.Context) error {
 	}
 
 	return fmt.Errorf("proxy creation failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// bannedRegions returns a set of regions that are currently banned.
+func (pm *PoolManager) bannedRegions() map[string]bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	now := time.Now()
+	banned := make(map[string]bool)
+	for region, until := range pm.regionBans {
+		if now.Before(until) {
+			banned[region] = true
+		} else {
+			delete(pm.regionBans, region) // clean expired
+		}
+	}
+	return banned
 }
 
 // ipBannedLocked reports whether the egress IP is currently banned.
@@ -187,21 +199,6 @@ func (pm *PoolManager) ipBanned(ip string) bool {
 	return pm.ipBannedLocked(ip, time.Now())
 }
 
-// poolHasIP reports whether any proxy in the pool (other than the one
-// with ID proxyID) already egresses from the given IP. All states are
-// considered: a cooldown/unhealthy container still occupies its IP, and a
-// replacement must not be assigned it.
-func (pm *PoolManager) poolHasIP(proxyID, ip string) bool {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-	for id, other := range pm.pool {
-		if id != proxyID && other.EgressIP == ip {
-			return true
-		}
-	}
-	return false
-}
-
 // GetProxy returns an available proxy, blocking if none available
 func (pm *PoolManager) GetProxy(ctx context.Context, conversationID string) (*Proxy, error) {
 	// Check for sticky session first
@@ -221,26 +218,27 @@ func (pm *PoolManager) GetProxy(ctx context.Context, conversationID string) (*Pr
 
 	// Wait for available proxy
 	for {
-		pm.mu.RLock()
+		// Use write lock since we modify proxy state and counters
+		pm.mu.Lock()
 		now := time.Now()
 		for _, proxy := range pm.pool {
 			if proxy.IsAvailable() && !pm.ipBannedLocked(proxy.EgressIP, now) {
 				proxy.State = StateActive
 				proxy.LastUsed = time.Now()
 				proxy.RequestsSent++
-				pm.totalRequests++
+				pm.totalRequests.Add(1)
 
 				// Set sticky session
 				if conversationID != "" {
 					pm.sticky[conversationID] = proxy.ID
 				}
 
-				pm.mu.RUnlock()
+				pm.mu.Unlock()
 				pm.log.Debug().Str("proxy_id", proxy.ID).Msg("Acquired proxy")
 				return proxy, nil
 			}
 		}
-		pm.mu.RUnlock()
+		pm.mu.Unlock()
 
 		// No proxy available, wait
 		select {
@@ -376,7 +374,7 @@ func (pm *PoolManager) pruneDeadProxies() {
 // MarkRateLimited marks a proxy as rate limited: its egress IP is banned for
 // max(IPBanDuration, RetryAfter) so no request is routed through it, the proxy
 // itself is moved to cooldown, and the pool is topped up with a fresh
-// replacement container (regardless of tier — see ensurePoolCapacity).
+// replacement container from a different region.
 //
 // publicTier indicates the upstream throttle is tied to account identity
 // rather than egress IP; it is informational (the caller already surfaces
@@ -393,19 +391,26 @@ func (pm *PoolManager) MarkRateLimited(proxy *Proxy, retryAfter string, publicTi
 
 	pm.mu.Lock()
 	pm.banIPLocked(proxy.EgressIP, time.Now().Add(banFor))
+
+	// Also ban the region so replacement containers use a different region
+	if proxy.Region != "" {
+		pm.regionBans[proxy.Region] = time.Now().Add(banFor)
+	}
+
 	if pr, exists := pm.pool[proxy.ID]; exists {
 		pr.State = StateCooldown
 		pr.LastUsed = time.Now()
 		pr.ErrorCount++
-		pm.totalErrors++
+		pm.totalErrors.Add(1)
 
 		pm.log.Warn().
 			Str("proxy_id", pr.ID).
 			Str("ip", pr.EgressIP).
+			Str("region", pr.Region).
 			Dur("cooldown", pm.cfg.CooldownDuration).
 			Dur("ip_ban", banFor).
 			Bool("public_tier", publicTier).
-			Msg("Proxy rate limited, moving to cooldown and banning egress IP")
+			Msg("Proxy rate limited, moving to cooldown and banning region")
 	}
 
 	// Signals
@@ -439,7 +444,7 @@ func (pm *PoolManager) MarkUnhealthy(proxy *Proxy) {
 	if pr, exists := pm.pool[proxy.ID]; exists {
 		pr.State = StateUnhealthy
 		pr.ErrorCount++
-		pm.totalErrors++
+		pm.totalErrors.Add(1)
 
 		pm.log.Warn().
 			Str("proxy_id", pr.ID).
@@ -476,8 +481,8 @@ func (pm *PoolManager) Stats() PoolStats {
 
 	stats := PoolStats{
 		Total:         len(pm.pool),
-		TotalRequests: pm.totalRequests,
-		TotalErrors:   pm.totalErrors,
+		TotalRequests: int(pm.totalRequests.Load()),
+		TotalErrors:   int(pm.totalErrors.Load()),
 	}
 
 	for _, proxy := range pm.pool {
@@ -537,7 +542,7 @@ func (pm *PoolManager) checkAllProxies(ctx context.Context) {
 	for _, proxy := range proxies {
 		healthy, err := pm.mgr.HealthCheck(ctx, proxy)
 		if err != nil {
-			pm.log.Debug().Err(err).Str("proxy_id", proxy.ID).Msg("Health check failed")
+			pm.log.Warn().Err(err).Str("proxy_id", proxy.ID).Msg("Health check failed")
 		}
 
 		pm.mu.Lock()
@@ -580,20 +585,27 @@ func (pm *PoolManager) cooldownLoop(ctx context.Context) {
 
 // restoreCooldownProxies moves expired cooldown proxies back to idle, prunes
 // excess containers that were spawned during rate-limit rotation, and clears
-// stale IP bans.
+// stale IP and region bans.
 func (pm *PoolManager) restoreCooldownProxies() {
 	pm.mu.Lock()
 	now := time.Now()
 	var toRemove []string
 
-	for _, proxy := range pm.pool {
-		// Clear expired IP bans.
-		if proxy.EgressIP != "" {
-			if until, ok := pm.ipBans[proxy.EgressIP]; ok && !now.Before(until) {
-				delete(pm.ipBans, proxy.EgressIP)
-			}
+	// Clear expired IP bans
+	for ip, until := range pm.ipBans {
+		if !now.Before(until) {
+			delete(pm.ipBans, ip)
 		}
+	}
 
+	// Clear expired region bans
+	for region, until := range pm.regionBans {
+		if !now.Before(until) {
+			delete(pm.regionBans, region)
+		}
+	}
+
+	for _, proxy := range pm.pool {
 		if proxy.State != StateCooldown {
 			continue
 		}

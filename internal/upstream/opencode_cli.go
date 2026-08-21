@@ -17,9 +17,9 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// OpenCodeCLIClient drives the opencode CLI inside each WARP container via
+// OpenCodeCLIClient drives the opencode CLI inside each VPN container via
 // docker exec (Proxy.ExecIn), so every request is executed by an agent that
-// egresses through that container's unique WARP IP. The client's credential is
+// egresses through that container's unique VPN IP. The client's credential is
 // injected as a provider env var (default ANTHROPIC_API_KEY) per exec.
 //
 // `opencode run --format json` emits NDJSON events on stdout; this driver

@@ -17,7 +17,7 @@ import (
 )
 
 // OpenCodeClient drives an OpenCode Server (opencode serve) instance through a
-// per-request WARP proxy so each request egresses from a unique IP. It adapts
+// per-request VPN proxy so each request egresses from a unique IP. It adapts
 // OpenCode's session/message API to the OpenAI-compatible shape the handler
 // expects from upstream.Upstream.
 //
@@ -180,13 +180,6 @@ func (c *OpenCodeClient) newRequest(ctx context.Context, p *proxypkg.Proxy, meth
 	if err != nil {
 		return nil, nil, err
 	}
-	addr := strings.TrimPrefix(p.SOCKS5Addr, "socks5://")
-	dialer, err := NewSOCKS5Dialer(addr)
-	if err != nil {
-		return nil, nil, err
-	}
-	client.Transport = &http.Transport{Dial: dialer.Dial}
-	client.Timeout = c.cfg.RequestTimeout
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return nil, nil, err

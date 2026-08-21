@@ -1,7 +1,7 @@
 services:
   gateway:
     build: .
-    # Host networking is required: the gateway creates WARP containers that
+    # Host networking is required: the gateway creates VPN containers that
     # publish SOCKS5 ports on the host loopback (127.0.0.1:<port>).
     network_mode: host
     environment:
@@ -20,7 +20,10 @@ services:
       - OPENCODE_CLI_MODELS=${OPENCODE_CLI_MODELS}
       - PROXY_POOL_SIZE=${PROXY_POOL_SIZE:-10}
       - PROXY_BASE_PORT=${PROXY_BASE_PORT:-10801}
-      - WARP_IMAGE=${WARP_IMAGE:-caomingjun/warp:latest}
+      - VPN_IMAGE=${VPN_IMAGE:-ghcr.io/tprasadtp/protonwire:latest}
+      - PROTONVPN_PRIVATE_KEY_DIR=/app/protonvpn-keys
+      - PROTONVPN_SERVER=${PROTONVPN_SERVER:-node-nl-01.protonvpn.net}
+      - PROTONVPN_IP_CHECK_URL=${PROTONVPN_IP_CHECK_URL:-https://icanhazip.com/}
       - RATE_LIMIT_COOLDOWN=${RATE_LIMIT_COOLDOWN:-5m}
       - RATE_LIMIT_RETRY_AFTER=${RATE_LIMIT_RETRY_AFTER:-60}
       - IP_BAN_DURATION=${IP_BAN_DURATION:-10m}
@@ -42,6 +45,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - gateway-data:/app/data
+      - ./protonvpn-keys:/app/protonvpn-keys:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${GATEWAY_PORT:-8082}/api/metrics > /dev/null || exit 1"]

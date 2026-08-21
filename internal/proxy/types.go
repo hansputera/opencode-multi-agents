@@ -17,11 +17,11 @@ const (
 	StateUnhealthy ProxyState = "unhealthy"
 )
 
-// Proxy represents a single WARP container proxy
+// Proxy represents a single VPN container proxy
 type Proxy struct {
-	ID           string       `json:"id"`
-	ContainerID  string       `json:"container_id"`
-	SOCKS5Addr   string       `json:"socks5_addr"`
+	ID           string       `json:"-"`
+	ContainerID  string       `json:"-"`
+	SOCKS5Addr   string       `json:"-"`
 	Port         int          `json:"port"`
 	State        ProxyState   `json:"state"`
 	LastUsed     time.Time    `json:"last_used"`
@@ -30,10 +30,41 @@ type Proxy struct {
 	ErrorCount   int          `json:"error_count"`
 	CreatedAt    time.Time    `json:"created_at"`
 	EgressIP     string       `json:"egress_ip"`
+	Region       string       `json:"region"`
+	KeyFile      string       `json:"-"`
 
 	// manager is the container manager that created this proxy, used by
 	// ExecIn to docker-exec commands inside the container. Wired by the pool.
 	manager atomic.Pointer[Manager]
+}
+
+// ProxySnapshot is a sanitized view of Proxy safe for API responses.
+// It excludes internal fields (ContainerID, SOCKS5Addr, KeyFile, ID).
+type ProxySnapshot struct {
+	Port         int          `json:"port"`
+	State        ProxyState   `json:"state"`
+	LastUsed     time.Time    `json:"last_used"`
+	LastCheck    time.Time    `json:"last_check"`
+	RequestsSent int          `json:"requests_sent"`
+	ErrorCount   int          `json:"error_count"`
+	CreatedAt    time.Time    `json:"created_at"`
+	EgressIP     string       `json:"egress_ip"`
+	Region       string       `json:"region"`
+}
+
+// Snapshot returns a sanitized copy safe for API responses.
+func (p *Proxy) Snapshot() ProxySnapshot {
+	return ProxySnapshot{
+		Port:         p.Port,
+		State:        p.State,
+		LastUsed:     p.LastUsed,
+		LastCheck:    p.LastCheck,
+		RequestsSent: p.RequestsSent,
+		ErrorCount:   p.ErrorCount,
+		CreatedAt:    p.CreatedAt,
+		EgressIP:     p.EgressIP,
+		Region:       p.Region,
+	}
 }
 
 // IsHealthy returns true if the proxy is in a healthy state
@@ -61,6 +92,8 @@ type PoolStats struct {
 type Manager interface {
 	// Create creates a new proxy container
 	Create(ctx context.Context) (*Proxy, error)
+	// CreateEx creates a new proxy container, avoiding the given banned regions
+	CreateEx(ctx context.Context, bannedRegions map[string]bool) (*Proxy, error)
 	// Remove removes a proxy container
 	Remove(ctx context.Context, id string) error
 	// HealthCheck performs health check on a proxy

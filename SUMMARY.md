@@ -1,14 +1,14 @@
 # Project Summary
 
-## OpenAI-Compatible API Gateway with Automatic IP Rotation
+## OpenAI-Compatible API Gateway with Automatic Region Rotation
 
-A lightweight, performant API gateway built in Go that provides OpenAI-compatible endpoints with automatic IP rotation using Cloudflare WARP containers.
+A lightweight, performant API gateway built in Go that provides OpenAI-compatible endpoints with automatic region rotation using ProtonVPN WireGuard containers.
 
 ### ✅ Completed Implementation
 
 #### Core Features
 - ✅ OpenAI-compatible API endpoints (`/v1/chat/completions`, `/v1/models`)
-- ✅ Automatic IP rotation through Cloudflare WARP containers
+- ✅ Automatic region rotation through ProtonVPN containers on rate limit
 - ✅ Rate limit detection (HTTP 429 + keyword matching)
 - ✅ Automatic retry with exponential backoff
 - ✅ Server-Sent Events (SSE) streaming support
@@ -74,8 +74,8 @@ opencode-multi-agents/
 - Configurable cooldown duration
 
 **3. Docker Integration**
-- Automatic WARP container lifecycle management
-- Health checks via cloudflare.com/cdn-cgi/trace
+- Automatic ProtonVPN container lifecycle management
+- Health checks via icanhazip.com
 - Resource limits per container (CPU, memory)
 - Orphan cleanup on startup
 
@@ -169,7 +169,7 @@ curl http://localhost:8082/stats
 ### 🔄 Rate Limit Flow
 
 ```
-Request → Get Proxy → Forward → 429? → Mark Cooldown → Get New Proxy → Retry
+Request → Get Proxy → Forward → 429? → Ban Region → Get New Proxy (Different Region) → Retry
                                 ↓
                             No 429 → Return Response
 ```
@@ -185,8 +185,7 @@ To complete the project:
 
 ### 📝 Notes
 
-- Health check currently uses direct connection (not through proxy)
-  - Could be enhanced to validate WARP status per container
+- Health check uses icanhazip.com to verify VPN connectivity
 - Sticky sessions use in-memory map (cleared on restart)
   - Could be persisted to Redis for multi-instance deployment
 - Pool size is static at startup
@@ -197,8 +196,9 @@ To complete the project:
 1. **Smart Rate Limit Detection**: Not just HTTP 429, but also keyword matching in response bodies
 2. **Sticky Sessions**: Same conversation uses same IP for consistency
 3. **Zero-Downtime Rotation**: New proxies created while old ones cool down
-4. **Resource Efficient**: Each WARP container limited to 0.25 CPU and 512MB RAM
-5. **Comprehensive Observability**: Health, stats, and structured logging
+4. **Region Rotation**: Automatically switches ProtonVPN regions on rate limit
+5. **Resource Efficient**: Each VPN container limited to 0.25 CPU and 512MB RAM
+6. **Comprehensive Observability**: Health, stats, and structured logging
 
 ---
 

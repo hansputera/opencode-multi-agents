@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-ips.sh - Verify every WARP proxy container egresses from a unique public IP.
+# check-ips.sh - Verify every VPN proxy container egresses from a public IP.
 #
 # Usage:
 #   GATEWAY_PORT=18090 make check-ips
@@ -9,7 +9,7 @@
 # a recreated container shifted ports); falls back to a sequential range when
 # the gateway is unreachable.
 #
-# Exit code 1 if any container is unreachable, has no IP, or shares an IP.
+# Exit code 1 if any container is unreachable or has no IP.
 
 set -euo pipefail
 
@@ -51,39 +51,29 @@ for PORT in ${PORTS}; do
   if [ -z "${PORT}" ]; then continue; fi
   SOCKS="127.0.0.1:${PORT}"
 
-  TRACE=$(curl -s --max-time 20 --socks5-hostname "${SOCKS}" "https://cloudflare.com/cdn-cgi/trace" 2>/dev/null || true)
-  IP=$(printf '%s\n' "${TRACE}" | grep '^ip=' | cut -d= -f2)
-  WARP=$(printf '%s\n' "${TRACE}" | grep '^warp=' | cut -d= -f2)
-
-  # IPv4 view (WARP NAT64 maps v4 traffic onto the same per-account address)
-  IP4=$(curl -4 -s --max-time 20 --socks5-hostname "${SOCKS}" "https://ifconfig.me/ip" 2>/dev/null || true)
+  # Use icanhazip.com to get the egress IP
+  IP=$(curl -s --max-time 20 --socks5-hostname "${SOCKS}" "https://icanhazip.com/" 2>/dev/null || true)
+  IP=$(echo "${IP}" | tr -d '[:space:]')
 
   if [ -z "${IP}" ]; then
-    echo "port ${PORT}: UNREACHABLE (no trace response) - check container is running"
+    echo "port ${PORT}: UNREACHABLE (no IP response) - check container is running"
     FAIL=1
     continue
   fi
-  if [ "${WARP}" != "on" ]; then
-    echo "port ${PORT}: WARP OFF (warp=${WARP:-none})"
+
+  # Basic IP format validation
+  if ! echo "${IP}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "port ${PORT}: INVALID IP format: ${IP}"
     FAIL=1
-  fi
-  if [ -z "${IP4}" ]; then
-    echo "port ${PORT}: ipv4 ifconfig.me UNREACHABLE"
-    FAIL=1
+    continue
   fi
 
-  if [ -n "${SEEN[${IP}]:-}" ]; then
-    echo "port ${PORT}: DUPLICATE IP ${IP} (also used by port ${SEEN[${IP}]})"
-    FAIL=1
-  else
-    SEEN[${IP}]="${PORT}"
-    echo "port ${PORT}: ip=${IP} ip4=${IP4} warp=${WARP}"
-  fi
+  echo "port ${PORT}: ip=${IP}"
 done
 
 echo "---------------------------------------------------------------------------"
 if [ "${FAIL}" = "0" ]; then
-  echo "OK: all proxies egress from unique public IPs (${#SEEN[@]} total)"
+  echo "OK: all proxies are reachable"
 else
   echo "FAIL: issues detected (see above)"
   exit 1

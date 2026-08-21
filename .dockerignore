@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose*.yml
+
+# Documentation
+*.md
+SUMMARY.md
+LICENSE
+
+# Test files
+*_test.go
+testdata/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+
+# Data files (will be mounted as volumes)
+data/
+
+# Environment files
+.env
+.env.*
+
+# ProtonVPN keys (should be mounted as volumes)
+protonvpn-keys/

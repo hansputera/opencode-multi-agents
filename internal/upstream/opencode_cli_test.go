@@ -23,7 +23,14 @@ type cliExecManager struct {
 	}
 }
 
-func (m *cliExecManager) Create(ctx context.Context) (*proxypkg.Proxy, error) { return nil, nil }
+func (m *cliExecManager) Create(ctx context.Context) (*proxypkg.Proxy, error) {
+	return m.CreateEx(ctx, nil)
+}
+
+func (m *cliExecManager) CreateEx(ctx context.Context, bannedRegions map[string]bool) (*proxypkg.Proxy, error) {
+	return nil, nil
+}
+
 func (m *cliExecManager) Remove(ctx context.Context, id string) error         { return nil }
 func (m *cliExecManager) HealthCheck(ctx context.Context, p *proxypkg.Proxy) (bool, error) {
 	return true, nil

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/proxy"
 
@@ -21,6 +22,7 @@ type Client struct {
 	cfg       *config.Config
 	base      string
 	log       *zerolog.Logger
+	mu        sync.RWMutex
 	httpCache map[string]*http.Client // Cache clients per proxy
 }
 
@@ -170,10 +172,13 @@ func (c *Client) DoModels(ctx context.Context, p *proxypkg.Proxy, auth Auth) (*h
 
 // getClient returns an HTTP client configured with the given proxy
 func (c *Client) getClient(p *proxypkg.Proxy) (*http.Client, error) {
-	// Check cache
+	// Check cache with read lock
+	c.mu.RLock()
 	if client, ok := c.httpCache[p.ID]; ok {
+		c.mu.RUnlock()
 		return client, nil
 	}
+	c.mu.RUnlock()
 
 	// Parse SOCKS5 address
 	// Format: socks5://127.0.0.1:10801
@@ -184,7 +189,10 @@ func (c *Client) getClient(p *proxypkg.Proxy) (*http.Client, error) {
 
 	// Create HTTP client with SOCKS5 transport
 	transport := &http.Transport{
-		Dial: dialer.Dial,
+		Dial:                dialer.Dial,
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     90,
 	}
 
 	client := &http.Client{
@@ -192,15 +200,22 @@ func (c *Client) getClient(p *proxypkg.Proxy) (*http.Client, error) {
 		Timeout:   c.cfg.RequestTimeout,
 	}
 
-	// Cache for reuse
+	// Cache for reuse with write lock
+	c.mu.Lock()
+	// Double-check in case another goroutine created it
+	if existing, ok := c.httpCache[p.ID]; ok {
+		c.mu.Unlock()
+		return existing, nil
+	}
 	c.httpCache[p.ID] = client
+	c.mu.Unlock()
 
 	return client, nil
 }
 
 // NewSOCKS5Dialer builds a SOCKS5 dialer (no-auth) from a "socks5://host:port"
 // address. Shared by the Zen client and the OpenCode client so every upstream
-// request is egressed through the assigned proxy container's WARP IP.
+// request is egressed through the assigned proxy container's VPN IP.
 func NewSOCKS5Dialer(socks5Addr string) (proxy.Dialer, error) {
 	addr := strings.TrimPrefix(socks5Addr, "socks5://")
 	dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
