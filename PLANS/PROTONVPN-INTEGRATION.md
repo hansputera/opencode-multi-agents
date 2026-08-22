@@ -1,12 +1,32 @@
 # ProtonVPN Native WireGuard Integration Plan
 
+> ## ✅ STATUS: IMPLEMENTED
+>
+> This plan has been fully implemented and verified working (handshake completes, traffic flows through ProtonVPN egress IPs).
+> The sections below describe the *original plan*; deviations discovered during implementation are documented here:
+>
+> ### As-Built Deviations from the Plan
+>
+> | Area | Plan Said | Actually Implemented |
+> |---|---|---|
+> | **Auth flow** | Direct `POST /auth/info` → `POST /auth` | Browser-mimicking 7-step flow: `/api/auth/v4/sessions` → `/api/core/v4/auth/cookies` → `/auth/info (Intent:Auto)` → SRP proofs (`go-srp` v4) → `/auth` → `/users` → `/keys/salts`. The initial session token is only used to bootstrap cookies; afterwards `x-pm-uid` header + merged cookie jar authenticate everything. |
+> | **Cookie handling** | Not specified | Critical: `/auth` sets a *new simple* AUTH cookie that must **replace by name** the initial JWT cookie from `/auth/cookies` (`mergeCookies`). |
+> | **Certificate endpoint** | `vpn-api.proton.me/api/vpn/v1/certificate` | `account.protonvpn.com/api/vpn/v1/certificate` (matches the browser's VPN settings app). Server list stays on `vpn-api.proton.me/api/vpn/v2/logicals`. |
+> | **Client key type for cert API** | X25519 public key | **Ed25519** public key (raw base64). The WireGuard X25519 private key is then **derived from the Ed25519 key** via SHA-512 clamping (`ed25519PrivKeyToCurve25519`). Deriving/independently generating an unrelated X25519 key causes ProtonVPN to silently drop all tunnel traffic — the handshake never completes. |
+> | **Cert request payload** | `{ClientPublicKey, Mode, Features}` | Same, but `Features` is an **object** with `peerName`, `peerIp`, `peerPublicKey`, `platform`; `Mode: "persistent"`. Response may include `IPv4`, `IPv6`, `DNS[]` (paid); free accounts omit them. |
+> | **WireGuard addressing** | Address = cert VPN IP; Endpoint = server ExitIP | Free tier: client address falls back to `10.2.0.2/32`, DNS to `10.2.0.1` (ProtonVPN internal DNS — external DNS is blocked through the tunnel). **Endpoint = `cert.Features.PeerIP:51820`**, peer pubkey = `cert.Features.PeerPublicKey`. |
+> | **Server selection** | `SelectServer(region, bannedRegions)` | `SelectServer(region, bannedRegions, avoidServers)` — new containers avoid logical servers already used by pool proxies, spreading exit IPs across subnets; falls back to any online server when all are avoided. Status filter: `Status != 0` means offline (0 = online). |
+> | **Concurrency safety** | Not specified | Ed25519 key creation is serialized with a mutex — concurrent certificate requests cause ProtonVPN key-conflict churn (409 / code 2500). |
+> | **Container runtime** | Alpine + `wireguard-tools gost bash` packages; manual wg config | `gost` is not in Alpine repos — pulled from `go-gost/gost` v3.0.0 GitHub release. Entrypoint writes a full wg0.conf and uses **`wg-quick up`** (handles routing/DNS correctly). Containers run `--privileged` + `NET_ADMIN` with sysctls (`rp_filter=2`, `src_valid_mark=1`, ipv6 disabled). |
+> | **Config additions** | Username/Password/APIBase/StorePath/Regions | Also added `PROTONVPN_VPN_API_BASE` (server-list API separate from account API). |
+
 ## Overview
 
 Replace the current WireGuard key-file-based ProtonVPN approach with ProtonVPN's native WireGuard protocol using certificate-based authentication via SRP (Secure Remote Password).
 
-## Current State
+## Original State (before implementation)
 
-- **Current**: Uses `.key` files containing raw WireGuard private keys
+- **Old**: Used `.key` files containing raw WireGuard private keys
 - **New**: Uses OpenVPN credentials (username/password) to authenticate via SRP, obtain certificates, and establish WireGuard tunnels
 
 ## Library Stack
@@ -20,45 +40,52 @@ Replace the current WireGuard key-file-based ProtonVPN approach with ProtonVPN's
 
 ---
 
-## Authentication Flow
+## Authentication Flow (as implemented)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ 1. POST /api/core/v4/auth/info                               │
-│    Request:  {"Username":"user@example.com","Intent":"Auto"} │
-│    Response: Modulus (PGP signed), ServerEphemeral, Salt,    │
-│              SRPSession, Version                             │
-├──────────────────────────────────────────────────────────────┤
-│ 2. POST /api/core/v4/auth/info (Intent:"Proton")             │
-│    Response: Same structure, different ServerEphemeral       │
-├──────────────────────────────────────────────────────────────┤
-│ 3. SRP Computation (client-side)                             │
-│    - Verify PGP signature on Modulus                         │
-│    - Compute: ClientProof, ClientEphemeral                   │
-│    - Derive: AuthKey from password + salt                    │
-├──────────────────────────────────────────────────────────────┤
-│ 4. POST /api/core/v4/auth                                    │
-│    Request:  ClientProof, ClientEphemeral, SRPSession,       │
-│              Username, Payload (encrypted with AuthKey)      │
-│    Response: UID, UserID, Scopes, ServerProof                │
-│    Cookies: AUTH-*, Session-Id, Tag, Domain, st, Features    │
-├──────────────────────────────────────────────────────────────┤
-│ 5. GET /api/core/v4/users (with cookies)                     │
-│    Response: User info, Keys (encrypted PGP private keys)    │
-├──────────────────────────────────────────────────────────────┤
-│ 6. GET /api/core/v4/keys/salts (with cookies)                │
-│    Response: KeySalts for key decryption                     │
-├──────────────────────────────────────────────────────────────┤
-│ 7. POST /api/vpn/v1/certificate (with cookies)               │
-│    Request:  ClientPublicKey (X25519), Mode, Features        │
-│    Response: Certificate, ServerPublicKey, etc.              │
-├──────────────────────────────────────────────────────────────┤
-│ 8. Configure WireGuard tunnel                                │
-│    - PrivateKey: Generated X25519                            │
-│    - PublicKey: Server's X25519 key (from certificate)       │
-│    - Address: VPN IP from certificate                        │
-│    - Endpoint: Server IP:51820                               │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ 1. POST /api/auth/v4/sessions                                    │
+│    Response: AccessToken, RefreshToken, UID                      │
+├──────────────────────────────────────────────────────────────────┤
+│ 2. GET /api/core/v4/auth/cookies?token=<AccessToken>             │
+│    Sets initial JWT AUTH cookie + Session-Id, Tag, Domain...     │
+├──────────────────────────────────────────────────────────────────┤
+│ 3. POST /api/core/v4/auth/info  {Username, Intent:"Auto"}        │
+│    Headers: x-pm-uid + cookies from step 2                       │
+│    Response: Modulus (PGP signed), ServerEphemeral, Salt,        │
+│              SRPSession, Version                                 │
+├──────────────────────────────────────────────────────────────────┤
+│ 4. SRP computation (client-side, github.com/ProtonMail/go-srp)   │
+│    - srp.NewAuth(version, username, password, salt,              │
+│      modulus, serverEphemeral).GenerateProofs(2048)              │
+│    - → ClientProof, ClientEphemeral                              │
+├──────────────────────────────────────────────────────────────────┤
+│ 5. POST /api/core/v4/auth                                        │
+│    Body: ClientProof, ClientEphemeral, SRPSession, Username,     │
+│          Payload                                                 │
+│    Response: UID, UserID, ExpiresIn, ServerProof                 │
+│    ⚠ Sets a NEW simple AUTH cookie that REPLACES the JWT one     │
+│    → mergeCookies() replaces by name                             │
+├──────────────────────────────────────────────────────────────────┤
+│ 6. GET /api/core/v4/users   (x-pm-uid + merged cookies)          │
+│    Response: User info                                           │
+│ 7. GET /api/core/v4/keys/salts                                   │
+├──────────────────────────────────────────────────────────────────┤
+│ 8. POST account.protonvpn.com/api/vpn/v1/certificate             │
+│    Body: ClientPublicKey (Ed25519, raw base64), Mode:"persistent"│
+│          Features{peerName, peerIp, peerPublicKey, platform}     │
+│    Response: Certificate, ExpirationTime, Features.PeerIP,       │
+│              Features.PeerPublicKey, [IPv4, IPv6, DNS]           │
+├──────────────────────────────────────────────────────────────────┤
+│ 9. Derive WireGuard X25519 private key from Ed25519 private key  │
+│    (SHA-512 clamping — ed25519PrivKeyToCurve25519)               │
+│    Configure wg0.conf and `wg-quick up wg0` inside the container │
+└──────────────────────────────────────────────────────────────────┘
+
+All requests carry web-app headers:
+  Accept: application/vnd.protonmail.v1+json
+  x-pm-appversion: web-vpn-settings@5.0.353.0
+  x-pm-uid: <session UID>   (on every authenticated call)
 ```
 
 ---
@@ -541,17 +568,19 @@ github.com/ProtonMail/gopenpgp/v3 v3.1.0
 
 ---
 
-## Implementation Order
+## Implementation Order (all phases completed ✅)
 
-1. **Phase 1-2**: Create `types.go` and `store.go` (data layer)
-2. **Phase 3**: Create `auth.go` (SRP authentication)
-3. **Phase 4**: Create `client.go` (VPN API client)
-4. **Phase 5**: Update `config.go` (new config fields)
-5. **Phase 6-7**: Update Dockerfile and entrypoint
-6. **Phase 8-9**: Update `docker.go` and `types.go`
-7. **Phase 10**: Update docker-compose.yml
-8. **Phase 11**: Add Go dependencies
-9. **Phase 12**: Test and verify
+1. **Phase 1-2**: Create `types.go` and `store.go` (data layer) ✅
+2. **Phase 3**: Create `auth.go` (SRP authentication) ✅
+3. **Phase 4**: Create `client.go` (VPN API client) ✅
+4. **Phase 5**: Update `config.go` (new config fields) ✅
+5. **Phase 6-7**: Update Dockerfile and entrypoint ✅
+6. **Phase 8-9**: Update `docker.go` and `types.go` ✅
+7. **Phase 10**: Update docker-compose.yml ✅
+8. **Phase 11**: Add Go dependencies ✅
+9. **Phase 12**: Test and verify ✅ — WireGuard handshake confirmed, egress IP verified via icanhazip.com
+
+See also [`docs/protonvpn-integration.md`](../docs/protonvpn-integration.md) for the as-built deep dive.
 
 ---
 

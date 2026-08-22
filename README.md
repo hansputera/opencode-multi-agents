@@ -2,6 +2,8 @@
 
 Lightweight and performant API gateway that provides OpenAI-compatible endpoints with automatic IP rotation using ProtonVPN WireGuard containers.
 
+> 📚 **Full documentation** in [`docs/`](docs/README.md): [core features](docs/core-features.md), [architecture](docs/architecture.md), [ProtonVPN integration](docs/protonvpn-integration.md), and [business logic](docs/business-logic.md).
+
 ## Features
 
 - **OpenAI-Compatible API**: Drop-in replacement for OpenAI API clients
