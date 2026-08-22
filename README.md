@@ -94,6 +94,7 @@ If a certificate key conflicts (409/2500), the gateway regenerates the Ed25519 k
 | `OPENCODE_CLI_MODELS` | Comma-separated model list for `/v1/models` (empty = live `opencode models` output) | - |
 | `PROXY_POOL_SIZE` | Number of VPN containers | `3` |
 | `PROXY_BASE_PORT` | Starting port for VPN containers | `10801` |
+| `PROXY_IP_ROTATE_ATTEMPTS` | Times a fresh proxy with a duplicate egress IP is rotated before one duplicate is kept (≤1 disables) | `3` |
 | `VPN_IMAGE` | Docker image for VPN containers (wireguard-tools + gost SOCKS5) | `ghcr.io/tprasadtp/protonwire:latest` |
 | `PROTONVPN_USERNAME` | ProtonVPN username (OpenVPN/OpenVPN-IKEv2 credential from account dashboard) | - |
 | `PROTONVPN_PASSWORD` | ProtonVPN password | - |
@@ -323,7 +324,9 @@ curl -s http://localhost:8082/v1/chat/completions \
 
 ## IP Diversity & Rotation
 
-New containers are spread across **different ProtonVPN servers** within the configured regions, so pool proxies get exit IPs from different subnets. When the upstream returns a rate limit (429), the gateway:
+New containers are spread across **different ProtonVPN servers** within the configured regions, so pool proxies get exit IPs from different subnets. Incoming requests are **load-balanced round-robin** across available containers (sticky sessions still pin). A fresh proxy whose egress IP duplicates an existing one is automatically rotated (up to `PROXY_IP_ROTATE_ATTEMPTS`) until it gets a unique IP.
+
+When the upstream returns a rate limit (429), the gateway:
 
 1. Bans the responsible egress IP and region for `max(IP_BAN_DURATION, upstream Retry-After)`
 2. Spins up a replacement container on a **different server** (already-used servers are avoided when selecting)

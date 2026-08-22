@@ -52,6 +52,11 @@ type Config struct {
 	// Proxy pool configuration
 	ProxyPoolSize       int           `yaml:"proxy_pool_size" env:"PROXY_POOL_SIZE"`
 	ProxyBasePort       int           `yaml:"proxy_base_port" env:"PROXY_BASE_PORT"`
+
+	// How many times a freshly created proxy with a duplicate egress IP is
+	// rotated (container replaced) before giving up and keeping one duplicate.
+	// Values <= 1 disable extra rotation.
+	ProxyIPRotateAttempts int `yaml:"proxy_ip_rotate_attempts" env:"PROXY_IP_ROTATE_ATTEMPTS"`
 	VPNImage            string        `yaml:"vpn_image" env:"VPN_IMAGE"`
 	CooldownDuration    time.Duration `yaml:"cooldown_duration" env:"RATE_LIMIT_COOLDOWN"`
 	HealthCheckPeriod   time.Duration `yaml:"health_check_period" env:"HEALTH_CHECK_PERIOD"`
@@ -149,6 +154,7 @@ func DefaultConfig() *Config {
 		OpenCodeCLIProviderEnv: "ANTHROPIC_API_KEY",
 		ProxyPoolSize:       3,
 		ProxyBasePort:       10801,
+		ProxyIPRotateAttempts: 3,
 		VPNImage:            "ghcr.io/tprasadtp/protonwire:latest",
 		ProtonVPNAPIBase:    "https://account.protonvpn.com",
 		ProtonVPNVpnAPIBase: "https://vpn-api.proton.me",
@@ -308,6 +314,11 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("PROXY_BASE_PORT"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			c.ProxyBasePort = i
+		}
+	}
+	if v := os.Getenv("PROXY_IP_ROTATE_ATTEMPTS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.ProxyIPRotateAttempts = i
 		}
 	}
 	if v := os.Getenv("WARP_IMAGE"); v != "" {

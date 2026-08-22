@@ -132,11 +132,13 @@ func TestBannedRegions(t *testing.T) {
 func newTestPool() *PoolManager {
 	log := zerolog.Nop()
 	return &PoolManager{
-		cfg:        config.DefaultConfig(),
-		log:        &log,
-		pool:       make(map[string]*Proxy),
-		ipBans:     make(map[string]time.Time),
-		regionBans: make(map[string]time.Time),
+		cfg:         config.DefaultConfig(),
+		log:         &log,
+		pool:        make(map[string]*Proxy),
+		sticky:      make(map[string]string),
+		ipBans:      make(map[string]time.Time),
+		regionBans:  make(map[string]time.Time),
+		usedServers: make(map[string]bool),
 	}
 }
 

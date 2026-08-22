@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,9 @@ type PoolManager struct {
 	// ensurePoolCapacity (guarded by mu) so concurrent triggers never spawn
 	// more than the deficit.
 	spawning int
+
+	// rr is the round-robin cursor for request dispatch (guarded by mu).
+	rr int
 
 	// Signals
 	available chan struct{}
@@ -111,6 +115,85 @@ func (pm *PoolManager) Start(ctx context.Context) error {
 	return nil
 }
 
+// duplicateIPLocked reports whether p's egress IP is already used by another
+// live (idle/active) pool proxy. Callers must hold pm.mu.
+func (pm *PoolManager) duplicateIPLocked(p *Proxy) bool {
+	if p.EgressIP == "" {
+		return false
+	}
+	for _, pr := range pm.pool {
+		if pr.ID == p.ID || pr.EgressIP == "" {
+			continue
+		}
+		// Only healthy proxies count: cooldown/unhealthy ones are on their
+		// way out and will be pruned.
+		if pr.EgressIP == p.EgressIP && (pr.State == StateIdle || pr.State == StateActive) {
+			return true
+		}
+	}
+	return false
+}
+
+// rotateUntilUniqueIP inserts the proxy into the pool and, while its egress
+// IP duplicates another live proxy's IP, replaces the container until it gets
+// a unique IP. When ProxyIPRotateAttempts is exhausted, ONE duplicated proxy
+// is kept (availability over diversity). Checking after insertion handles
+// concurrent creation during Start(): goroutines see each other as they land.
+func (pm *PoolManager) rotateUntilUniqueIP(ctx context.Context, proxy *Proxy) (*Proxy, error) {
+	attempts := pm.cfg.ProxyIPRotateAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	for i := 0; ; i++ {
+		pm.mu.Lock()
+		pm.pool[proxy.ID] = proxy
+		dup := pm.duplicateIPLocked(proxy)
+		if !dup {
+			pm.mu.Unlock()
+			return proxy, nil
+		}
+		// Take it back out while rotating so other creators don't see the dup.
+		delete(pm.pool, proxy.ID)
+		pm.mu.Unlock()
+
+		if i >= attempts-1 {
+			pm.log.Warn().
+				Str("id", proxy.ID).
+				Str("ip", proxy.EgressIP).
+				Int("attempts", i+1).
+				Msg("Duplicate egress IP persists after rotations; keeping one duplicate")
+			pm.mu.Lock()
+			pm.pool[proxy.ID] = proxy
+			pm.mu.Unlock()
+			return proxy, nil
+		}
+
+		pm.log.Warn().
+			Str("id", proxy.ID).
+			Str("ip", proxy.EgressIP).
+			Int("attempt", i+1).
+			Int("max_attempts", attempts).
+			Msg("Duplicate egress IP detected, rotating container")
+
+		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		rmErr := pm.mgr.Remove(rctx, proxy.ContainerID)
+		cancel()
+		if rmErr != nil {
+			pm.log.Error().Err(rmErr).Str("container_id", proxy.ContainerID).Msg("Failed to remove duplicate-IP container")
+		}
+
+		banned := pm.bannedRegions()
+		avoid := pm.usedServersAvoid()
+		np, err := pm.mgr.CreateEx(ctx, banned, avoid)
+		if err != nil {
+			pm.log.Error().Err(err).Msg("Proxy rotation after duplicate IP failed")
+			return nil, err
+		}
+		proxy = np
+	}
+}
+
 // createProxy creates a new proxy container and adds it to the pool, retrying
 // transient failures (e.g. slow VPN first-boot) with a short backoff.
 func (pm *PoolManager) createProxy(ctx context.Context) error {
@@ -138,9 +221,14 @@ func (pm *PoolManager) createProxy(ctx context.Context) error {
 			continue
 		}
 
-		pm.mu.Lock()
-		pm.pool[proxy.ID] = proxy
-		pm.mu.Unlock()
+		// Rotate while the new container shares an egress IP with an existing
+		// pool proxy. rotateUntilUniqueIP inserts into the pool itself.
+		final, err := pm.rotateUntilUniqueIP(ctx, proxy)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		proxy = final
 
 		if pm.mgr != nil {
 			proxy.SetManager(pm.mgr)
@@ -150,6 +238,7 @@ func (pm *PoolManager) createProxy(ctx context.Context) error {
 			Str("id", proxy.ID).
 			Str("socks5", proxy.SOCKS5Addr).
 			Str("region", proxy.Region).
+			Str("ip", proxy.EgressIP).
 			Msg("Created new proxy container")
 
 		// Signal availability
@@ -243,22 +332,38 @@ func (pm *PoolManager) GetProxy(ctx context.Context, conversationID string) (*Pr
 		// Use write lock since we modify proxy state and counters
 		pm.mu.Lock()
 		now := time.Now()
+		var candidates []*Proxy
 		for _, proxy := range pm.pool {
 			if proxy.IsAvailable() && !pm.ipBannedLocked(proxy.EgressIP, now) {
-				proxy.State = StateActive
-				proxy.LastUsed = time.Now()
-				proxy.RequestsSent++
-				pm.totalRequests.Add(1)
-
-				// Set sticky session
-				if conversationID != "" {
-					pm.sticky[conversationID] = proxy.ID
-				}
-
-				pm.mu.Unlock()
-				pm.log.Debug().Str("proxy_id", proxy.ID).Msg("Acquired proxy")
-				return proxy, nil
+				candidates = append(candidates, proxy)
 			}
+		}
+		if len(candidates) > 0 {
+			// Round-robin over a deterministically ordered candidate list so
+			// incoming requests are distributed evenly across containers
+			// (map iteration order is random in Go).
+			sort.Slice(candidates, func(i, j int) bool {
+				if candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+					return candidates[i].ID < candidates[j].ID
+				}
+				return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+			})
+			proxy := candidates[pm.rr%len(candidates)]
+			pm.rr++
+
+			proxy.State = StateActive
+			proxy.LastUsed = time.Now()
+			proxy.RequestsSent++
+			pm.totalRequests.Add(1)
+
+			// Set sticky session
+			if conversationID != "" {
+				pm.sticky[conversationID] = proxy.ID
+			}
+
+			pm.mu.Unlock()
+			pm.log.Debug().Str("proxy_id", proxy.ID).Msg("Acquired proxy")
+			return proxy, nil
 		}
 		pm.mu.Unlock()
 
@@ -561,6 +666,7 @@ func (pm *PoolManager) checkAllProxies(ctx context.Context) {
 	}
 	pm.mu.RUnlock()
 
+	driftDetected := false
 	for _, proxy := range proxies {
 		healthy, err := pm.mgr.HealthCheck(ctx, proxy)
 		if err != nil {
@@ -582,8 +688,24 @@ func (pm *PoolManager) checkAllProxies(ctx context.Context) {
 				default:
 				}
 			}
+			// Drift detection: a VPN reconnect can silently change a proxy's
+			// egress IP into a duplicate of another live proxy. Mark it
+			// unhealthy so the normal self-healing machinery rotates it.
+			if healthy && pr.State == StateIdle && pm.duplicateIPLocked(pr) {
+				pr.State = StateUnhealthy
+				driftDetected = true
+				pm.log.Warn().
+					Str("proxy_id", pr.ID).
+					Str("ip", pr.EgressIP).
+					Msg("Egress IP drifted into a duplicate of another proxy; rotating")
+			}
 		}
 		pm.mu.Unlock()
+	}
+
+	// Top the pool back up for any drift-rotated proxies.
+	if driftDetected {
+		pm.ensurePoolCapacity(ctx)
 	}
 }
 

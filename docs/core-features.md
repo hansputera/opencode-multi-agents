@@ -27,7 +27,9 @@ In-depth explanation of every feature: what it does, why it exists, and how it b
 
 - The pool manager tracks "used servers"; when creating a replacement container it passes this set as an avoid-list to server selection.
 - If every server in scope is already used, selection falls back to any online server (never fails just because of the avoid-list).
-- Each proxy card on the dashboard shows its egress IP; duplicate IPs are flagged in red.
+- **Duplicate IPs are rotated away**: a fresh proxy whose egress IP matches another live pool proxy is automatically replaced — up to `PROXY_IP_ROTATE_ATTEMPTS` (default 3) times — until it gets a unique IP. One duplicate is kept only when the free-tier IP pool is exhausted. Health-check drift (a tunnel reconnecting onto an existing IP) is detected and rotated as well.
+- Incoming requests are **load-balanced round-robin** across available, unbanned containers; sticky sessions still take precedence.
+- Each proxy card on the dashboard shows its egress IP; duplicate IPs are flagged in red (only possible after rotation attempts are exhausted).
 
 ## 3. Rate Limit Detection & Transparent Recovery
 
