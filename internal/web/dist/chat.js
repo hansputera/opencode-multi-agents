@@ -303,14 +303,27 @@ const ChatView = {
       </details>`;
   },
 
-  updateBubble(el, content, thinking) {
-    const holder = el.querySelector('.chat-content');
-    if (holder) {
-      const think = thinking ? this.thinkingBlock(thinking, true) : '';
-      holder.innerHTML = think + renderMarkdown(content);
-    } else {
-      el.innerHTML = content;
+  // updateBubble renders the full assistant bubble (avatar + optional live
+  // thinking block + markdown content + blinking cursor while streaming).
+  // Rebuilding the whole bubble each frame guarantees thinking AND response
+  // are both visible during streaming. If the user manually collapsed the
+  // thinking section mid-stream, their choice is respected.
+  updateBubble(el, content, thinking, streaming) {
+    let keepOpen = true;
+    if (streaming) {
+      const prev = el.querySelector('details.think');
+      keepOpen = !prev || prev.open;
     }
+    const think = thinking ? this.thinkingBlock(thinking, streaming && keepOpen) : '';
+    const body = content
+      ? renderMarkdown(content)
+      : (streaming ? '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>' : '');
+    const cursor = streaming ? '<span class="blink font-black">▌</span>' : '';
+    el.innerHTML = `
+      <div class="flex gap-3 fade-up">
+        <div class="w-8 h-8 shrink-0 rounded-full bg-ink text-yellow font-black text-sm flex items-center justify-center border-[3px] border-yellow">⚡</div>
+        <div class="bubble-assistant max-w-[85%] px-4 py-2.5 chat-content text-sm break-words min-w-0">${think}${body}${cursor}</div>
+      </div>`;
   },
 
   typingIndicator() {
@@ -380,10 +393,19 @@ const ChatView = {
     let acc = '';
     let accThinking = '';
     let finished = false;
+    let pendingRender = null;
+
+    const renderLive = () => {
+      pendingRender = null;
+      this.updateBubble(assistantEl, acc, accThinking, true);
+      this.scrollBottom();
+    };
 
     const finish = (success, aborted) => {
       if (finished) return;
       finished = true;
+      if (pendingRender !== null) cancelAnimationFrame(pendingRender);
+      pendingRender = null;
       this.state.streaming = false;
       this.state.aborter = null;
       $('#btn-send').disabled = false;
@@ -395,11 +417,16 @@ const ChatView = {
       if (!success) {
         assistantEl.innerHTML = role === 'error'
           ? `<div class="flex gap-3"><div class="w-8 h-8 shrink-0 rounded-full bg-ink text-yellow font-black text-sm flex items-center justify-center border-[3px] border-yellow">⚡</div><div class="bubble-error max-w-[85%] px-4 py-2.5 text-sm whitespace-pre-wrap break-words">⚠️ ${esc(acc)}</div></div>`
-          : this.typingBubbleWith(acc, accThinking);
+          : '';
         this.scrollBottom();
       }
+      // Always render the final bubble: thinking collapsed, full markdown,
+      // no cursor. Previously the success path left the last raw dump.
+      if (role === 'assistant') {
+        this.updateBubble(assistantEl, acc, accThinking, false);
+      }
 
- conv = this.conversation(convId);
+    conv = this.conversation(convId);
       if (conv) {
         if (role === 'error') {
           conv.messages.push({ role: 'error', content: acc });
@@ -433,8 +460,9 @@ const ChatView = {
       .then((reader) => this.readStream(reader, (delta, thinking) => {
         acc += delta;
         if (thinking) accThinking += thinking;
-        this.updateBubble(assistantEl, acc, accThinking);
-        this.scrollBottom();
+        // Throttle re-renders to one per animation frame — markdown parsing
+        // the full text on every token gets expensive on long responses.
+        if (pendingRender === null) pendingRender = requestAnimationFrame(renderLive);
       }))
       .then(() => finish(true, false))
       .catch((err) => {
@@ -446,14 +474,6 @@ const ChatView = {
           finish(false, false);
         }
       });
-  },
-
-  typingBubbleWith(text, thinking) {
-    return `
-      <div class="flex gap-3">
-        <div class="w-8 h-8 shrink-0 rounded-full bg-ink text-yellow font-black text-sm flex items-center justify-center border-[3px] border-yellow">⚡</div>
-        <div class="bubble-assistant max-w-[85%] px-4 py-2.5 chat-content text-sm break-words min-w-0">${this.thinkingBlock(thinking || '', true)}${renderMarkdown(text)}<span class="blink font-black">▌</span></div>
-      </div>`;
   },
 
   async readStream(reader, onDelta) {
