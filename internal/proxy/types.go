@@ -40,8 +40,9 @@ type Proxy struct {
 }
 
 // ProxySnapshot is a sanitized view of Proxy safe for API responses.
-// It excludes internal fields (ContainerID, SOCKS5Addr, ID).
 type ProxySnapshot struct {
+	ID           string       `json:"id"`
+	SOCKS5Addr   string       `json:"socks5_addr"`
 	Port         int          `json:"port"`
 	State        ProxyState   `json:"state"`
 	LastUsed     time.Time    `json:"last_used"`
@@ -58,6 +59,8 @@ type ProxySnapshot struct {
 // Snapshot returns a sanitized copy safe for API responses.
 func (p *Proxy) Snapshot() ProxySnapshot {
 	return ProxySnapshot{
+		ID:           p.ID,
+		SOCKS5Addr:   p.SOCKS5Addr,
 		Port:         p.Port,
 		State:        p.State,
 		LastUsed:     p.LastUsed,
