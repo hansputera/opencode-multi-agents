@@ -112,7 +112,17 @@ type Features struct {
 type Session struct {
 	UID       string
 	UserID    string
-	AuthKey   []byte
 	Cookies   []*http.Cookie
 	ExpiresAt time.Time
+}
+
+// SessionResponse represents the response from /api/auth/v4/sessions
+type SessionResponse struct {
+	Code         int      `json:"Code"`
+	AccessToken  string   `json:"AccessToken"`
+	RefreshToken string   `json:"RefreshToken"`
+	TokenType    string   `json:"TokenType"`
+	Scopes       []string `json:"Scopes"`
+	UID          string   `json:"UID"`
+	LocalID      int      `json:"LocalID"`
 }

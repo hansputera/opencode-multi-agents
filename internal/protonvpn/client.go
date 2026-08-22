@@ -20,6 +20,8 @@ type Client struct {
 	auth       *SRPAuth
 	httpClient *http.Client
 	log        *zerolog.Logger
+	username   string
+	password   string
 }
 
 // NewClient creates a new ProtonVPN client
@@ -30,7 +32,9 @@ func NewClient(store *Store, apiBase, username, password string, log *zerolog.Lo
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		log: log,
+		log:      log,
+		username: username,
+		password: password,
 	}
 }
 
@@ -118,6 +122,10 @@ func (c *Client) requestCertificate(session *Session, clientPublicKey string) (*
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
+	req.Header.Set("x-pm-appversion", "web-vpn-settings@5.0.353.0")
+	req.Header.Set("x-pm-locale", "en_US")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
 	for _, cookie := range session.Cookies {
 		req.AddCookie(cookie)
 	}
@@ -162,6 +170,10 @@ func (c *Client) FetchServerList() (*ServerListResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
+	req.Header.Set("x-pm-appversion", "web-vpn-settings@5.0.353.0")
+	req.Header.Set("x-pm-locale", "en_US")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -294,7 +306,11 @@ func (c *Client) EnsureSession() error {
 		// No session, need to login
 		credentials, _, err := c.store.GetCredentials()
 		if err != nil {
-			return fmt.Errorf("no credentials stored, please login first")
+			// No credentials stored, use the ones provided during initialization
+			if c.username == "" || c.password == "" {
+				return fmt.Errorf("no credentials stored and no credentials provided")
+			}
+			return c.Login(c.username, c.password)
 		}
 		return c.Login(credentials, credentials)
 	}
@@ -304,7 +320,11 @@ func (c *Client) EnsureSession() error {
 		c.log.Info().Msg("Session expired, refreshing")
 		credentials, _, err := c.store.GetCredentials()
 		if err != nil {
-			return fmt.Errorf("no credentials stored for refresh")
+			// No credentials stored, use the ones provided during initialization
+			if c.username == "" || c.password == "" {
+				return fmt.Errorf("no credentials stored for refresh and no credentials provided")
+			}
+			return c.Login(c.username, c.password)
 		}
 		return c.Login(credentials, credentials)
 	}

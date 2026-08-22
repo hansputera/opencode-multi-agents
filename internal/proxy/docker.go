@@ -75,11 +75,17 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 	// Initialize ProtonVPN client
 	protonClient := protonvpn.NewClient(store, cfg.ProtonVPNAPIBase, cfg.ProtonVPNUsername, cfg.ProtonVPNPassword, log)
 
-	// Ensure we have a valid session
-	if err := protonClient.EnsureSession(); err != nil {
-		cli.Close()
-		store.Close()
-		return nil, fmt.Errorf("failed to initialize ProtonVPN session: %w", err)
+	// Try to login with provided credentials (will store them in database)
+	if err := protonClient.Login(cfg.ProtonVPNUsername, cfg.ProtonVPNPassword); err != nil {
+		log.Warn().Err(err).Msg("Login failed, trying to use existing session")
+		// If login fails, try to use existing session
+		if err := protonClient.EnsureSession(); err != nil {
+			cli.Close()
+			store.Close()
+			return nil, fmt.Errorf("failed to initialize ProtonVPN session: %w", err)
+		}
+	} else {
+		log.Info().Msg("Successfully logged in to ProtonVPN")
 	}
 
 	dm := &DockerManager{

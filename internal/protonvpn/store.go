@@ -114,13 +114,12 @@ func (s *Store) SetCredentials(username, password string) error {
 // GetSession retrieves the stored session
 func (s *Store) GetSession() (*Session, error) {
 	var uid, userID string
-	var authKey []byte
 	var cookiesJSON string
 	var expiresAt time.Time
 
 	err := s.db.QueryRow(
-		"SELECT uid, user_id, auth_key, cookies, expires_at FROM session WHERE id = 1",
-	).Scan(&uid, &userID, &authKey, &cookiesJSON, &expiresAt)
+		"SELECT uid, user_id, cookies, expires_at FROM session WHERE id = 1",
+	).Scan(&uid, &userID, &cookiesJSON, &expiresAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("no session stored")
 	}
@@ -138,7 +137,6 @@ func (s *Store) GetSession() (*Session, error) {
 	return &Session{
 		UID:       uid,
 		UserID:    userID,
-		AuthKey:   authKey,
 		Cookies:   cookies,
 		ExpiresAt: expiresAt,
 	}, nil
@@ -152,8 +150,8 @@ func (s *Store) SetSession(session *Session) error {
 	}
 
 	_, err = s.db.Exec(
-		"INSERT OR REPLACE INTO session (id, uid, user_id, auth_key, cookies, expires_at) VALUES (1, ?, ?, ?, ?, ?)",
-		session.UID, session.UserID, session.AuthKey, string(cookiesJSON), session.ExpiresAt,
+		"INSERT OR REPLACE INTO session (id, uid, user_id, cookies, expires_at) VALUES (1, ?, ?, ?, ?)",
+		session.UID, session.UserID, string(cookiesJSON), session.ExpiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to set session: %w", err)
