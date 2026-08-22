@@ -243,18 +243,18 @@ func (dm *DockerManager) ensureImage(ctx context.Context) error {
 
 // Create creates a new VPN container
 func (dm *DockerManager) Create(ctx context.Context) (*Proxy, error) {
-	return dm.CreateEx(ctx, nil)
+	return dm.CreateEx(ctx, nil, nil)
 }
 
 // CreateEx creates a new VPN container, avoiding the given banned regions.
-func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions map[string]bool) (*Proxy, error) {
+func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions, avoidServers map[string]bool) (*Proxy, error) {
 	// Make sure the VPN image is available locally first
 	if err := dm.ensureImage(ctx); err != nil {
 		return nil, fmt.Errorf("VPN image unavailable: %w", err)
 	}
 
-	// Select server from API
-	logical, server, err := dm.protonvpn.SelectServer("", bannedRegions)
+	// Select server from API, avoiding servers already used by other proxies
+	logical, server, err := dm.protonvpn.SelectServer("", bannedRegions, avoidServers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to select server: %w", err)
 	}

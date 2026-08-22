@@ -36,6 +36,10 @@ type PoolManager struct {
 	// are created from a different region. Guarded by mu.
 	regionBans map[string]time.Time
 
+	// usedServers tracks logical server names currently in use by pool proxies
+	// so new containers are spread across different servers for diverse exit IPs.
+	usedServers map[string]bool
+
 	// spawning counts replacement containers currently being created by
 	// ensurePoolCapacity (guarded by mu) so concurrent triggers never spawn
 	// more than the deficit.
@@ -62,15 +66,16 @@ func NewPoolManager(cfg *config.Config, log *zerolog.Logger) (*PoolManager, erro
 // NewPoolManagerWithManager creates a proxy pool manager with a custom manager
 func NewPoolManagerWithManager(mgr Manager, cfg *config.Config, log *zerolog.Logger) *PoolManager {
 	return &PoolManager{
-		cfg:        cfg,
-		log:        log,
-		mgr:        mgr,
-		pool:       make(map[string]*Proxy),
-		sticky:     make(map[string]string),
-		ipBans:     make(map[string]time.Time),
-		regionBans: make(map[string]time.Time),
-		available:  make(chan struct{}, cfg.ProxyPoolSize),
-		done:       make(chan struct{}),
+		cfg:         cfg,
+		log:         log,
+		mgr:         mgr,
+		pool:        make(map[string]*Proxy),
+		sticky:      make(map[string]string),
+		ipBans:      make(map[string]time.Time),
+		regionBans:  make(map[string]time.Time),
+		usedServers: make(map[string]bool),
+		available:   make(chan struct{}, cfg.ProxyPoolSize),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -122,10 +127,11 @@ func (pm *PoolManager) createProxy(ctx context.Context) error {
 			}
 		}
 
-		// Get currently banned regions to avoid them
+		// Get currently banned regions and used servers to avoid them
 		banned := pm.bannedRegions()
+		avoid := pm.usedServersAvoid()
 
-		proxy, err := pm.mgr.CreateEx(ctx, banned)
+		proxy, err := pm.mgr.CreateEx(ctx, banned, avoid)
 		if err != nil {
 			lastErr = err
 			pm.log.Error().Err(err).Int("attempt", attempt).Msg("Proxy creation failed")
@@ -173,6 +179,22 @@ func (pm *PoolManager) bannedRegions() map[string]bool {
 		}
 	}
 	return banned
+}
+
+// usedServersAvoid returns a set of logical server names currently in use by
+// pool proxies, so new containers are spread across different servers for
+// diverse exit IPs.
+func (pm *PoolManager) usedServersAvoid() map[string]bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	avoid := make(map[string]bool)
+	for _, p := range pm.pool {
+		if p.ServerName != "" {
+			avoid[p.ServerName] = true
+		}
+	}
+	return avoid
 }
 
 // ipBannedLocked reports whether the egress IP is currently banned.

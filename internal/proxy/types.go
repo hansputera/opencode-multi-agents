@@ -101,7 +101,9 @@ type Manager interface {
 	// Create creates a new proxy container
 	Create(ctx context.Context) (*Proxy, error)
 	// CreateEx creates a new proxy container, avoiding the given banned regions
-	CreateEx(ctx context.Context, bannedRegions map[string]bool) (*Proxy, error)
+	// and servers. avoidServers spreads containers across different servers for
+	// diverse exit IPs.
+	CreateEx(ctx context.Context, bannedRegions, avoidServers map[string]bool) (*Proxy, error)
 	// Remove removes a proxy container
 	Remove(ctx context.Context, id string) error
 	// HealthCheck performs health check on a proxy

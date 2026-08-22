@@ -209,10 +209,10 @@ type stubManager struct {
 }
 
 func (s *stubManager) Create(ctx context.Context) (*Proxy, error) {
-	return s.CreateEx(ctx, nil)
+	return s.CreateEx(ctx, nil, nil)
 }
 
-func (s *stubManager) CreateEx(ctx context.Context, bannedRegions map[string]bool) (*Proxy, error) {
+func (s *stubManager) CreateEx(ctx context.Context, bannedRegions, avoidServers map[string]bool) (*Proxy, error) {
 	n := atomic.AddInt32(&s.createCount, 1)
 	return &Proxy{
 		ID:         fmt.Sprintf("stub-%d", n),

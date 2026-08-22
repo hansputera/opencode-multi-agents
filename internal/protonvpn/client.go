@@ -298,8 +298,8 @@ func (c *Client) FetchServerList() (*ServerListResponse, error) {
 	return &serverList, nil
 }
 
-// SelectServer selects the best server for a region
-func (c *Client) SelectServer(region string, bannedRegions map[string]bool) (*LogicalServer, *Server, error) {
+// SelectServer selects the best server for a region, optionally avoiding specific servers
+func (c *Client) SelectServer(region string, bannedRegions, avoidServers map[string]bool) (*LogicalServer, *Server, error) {
 	serverList, err := c.FetchServerList()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch server list: %w", err)
@@ -326,6 +326,11 @@ func (c *Client) SelectServer(region string, bannedRegions map[string]bool) (*Lo
 			continue
 		}
 
+		// Skip if server is in the avoid set (to spread across servers)
+		if avoidServers != nil && avoidServers[logical.Name] {
+			continue
+		}
+
 		// Skip if server is offline (ProtonVPN: 0=online, 1=down, 2=maintenance)
 		if logical.Status != 0 {
 			if i < 3 {
@@ -347,6 +352,32 @@ func (c *Client) SelectServer(region string, bannedRegions map[string]bool) (*Lo
 	}
 
 	c.log.Debug().Int("candidates", len(candidates)).Msg("SelectServer: found candidates")
+
+	// If all candidates were avoided, fall back to any available server
+	if len(candidates) == 0 && avoidServers != nil && len(avoidServers) > 0 {
+		c.log.Debug().Msg("All servers avoided, falling back to any available")
+		for i := range serverList.LogicalServers {
+			logical := &serverList.LogicalServers[i]
+			if region != "" && logical.ExitCountry != region {
+				continue
+			}
+			if bannedRegions != nil && bannedRegions[logical.ExitCountry] {
+				continue
+			}
+			if logical.Status != 0 {
+				continue
+			}
+			for j := range logical.Servers {
+				server := &logical.Servers[j]
+				if server.Status == 0 && server.X25519PublicKey != "" {
+					candidates = append(candidates, struct {
+						logical *LogicalServer
+						server  *Server
+					}{logical, server})
+				}
+			}
+		}
+	}
 
 	if len(candidates) == 0 {
 		return nil, nil, fmt.Errorf("no available servers for region %s", region)

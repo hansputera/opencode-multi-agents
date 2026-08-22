@@ -33,10 +33,10 @@ type fakeManager struct {
 }
 
 func (f *fakeManager) Create(ctx context.Context) (*proxy.Proxy, error) {
-	return f.CreateEx(ctx, nil)
+	return f.CreateEx(ctx, nil, nil)
 }
 
-func (f *fakeManager) CreateEx(ctx context.Context, bannedRegions map[string]bool) (*proxy.Proxy, error) {
+func (f *fakeManager) CreateEx(ctx context.Context, bannedRegions, avoidServers map[string]bool) (*proxy.Proxy, error) {
 	if len(f.proxies) > 0 {
 		p := f.proxies[0]
 		f.proxies = f.proxies[1:]
