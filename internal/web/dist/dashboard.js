@@ -43,7 +43,7 @@ const DashboardView = {
             </div>
           </div>
 
-          <div id="stats-grid" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-5"></div>
+          <div id="stats-grid" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-5"></div>
 
           <div id="pool-row" class="flex flex-wrap gap-3"></div>
 
@@ -57,7 +57,10 @@ const DashboardView = {
             </div>
 
             <div class="xl:col-span-2 neo-card p-5 bg-pink">
-              <h3 class="text-lg font-black mb-4">Model usage</h3>
+              <div class="flex items-center justify-between gap-2 mb-4">
+                <h3 class="text-lg font-black">Model usage</h3>
+                <span id="models-total-cost" class="badge bg-white">—</span>
+              </div>
               <div id="model-usage" class="space-y-3"></div>
             </div>
           </div>
@@ -102,7 +105,9 @@ const DashboardView = {
       { label: 'Total Requests', value: fmtNum(s.total_requests), color: 'bg-yellow', icon: '📈' },
       { label: 'Success Rate', value: s.success_rate != null ? s.success_rate.toFixed(1) + '%' : '—', color: 'bg-green', icon: '✅', extra: fmtNum(s.total_errors) + ' errors' },
       { label: 'Avg Latency', value: s.avg_latency_ms != null ? s.avg_latency_ms.toFixed(0) + 'ms' : '—', color: 'bg-blue', icon: '⏱️' },
-      { label: 'Streaming Reqs', value: fmtNum(s.stream_requests), color: 'bg-purple', icon: '🌊' },
+      { label: 'Total Tokens', value: fmtCompact(s.total_tokens), color: 'bg-pink', icon: '🔢', extra: fmtCompact(s.total_prompt_tokens) + ' in / ' + fmtCompact(s.total_completion_tokens) + ' out' },
+      { label: 'Est. Cost', value: fmtCost(s.total_estimated_cost), color: 'bg-purple', icon: '💸', extra: s.total_cached_tokens ? fmtCompact(s.total_cached_tokens) + ' cached' : '' },
+      { label: 'Streaming Reqs', value: fmtNum(s.stream_requests), color: 'bg-cream', icon: '🌊' },
       { label: 'Errors', value: fmtNum(s.total_errors), color: 'bg-red', icon: '🚨' },
       { label: 'Uptime', value: fmtDuration(s.uptime_seconds), color: 'bg-orange', icon: '⏳' },
     ];
@@ -187,6 +192,8 @@ const DashboardView = {
   renderModels(metrics) {
     const el = $('#model-usage');
     const models = (metrics && metrics.models) || [];
+    const totalCost = (metrics && metrics.summary && metrics.summary.total_estimated_cost) || 0;
+    $('#models-total-cost').textContent = fmtCost(totalCost);
     if (!models.length) {
       el.innerHTML = '<p class="text-sm font-bold opacity-70 bg-white border-[3px] border-ink rounded-lg p-3">no model usage yet — try the chat!</p>';
       return;
@@ -200,6 +207,12 @@ const DashboardView = {
         </div>
         <div class="h-4 border-[2px] border-ink rounded-md bg-cream overflow-hidden">
           <div class="h-full" style="width:${Math.max(4, m.requests / max * 100)}%;background:${NEO_COLORS[i % NEO_COLORS.length]};border-right:2px solid #1B1B1B"></div>
+        </div>
+        <div class="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-[11px] font-bold opacity-80">
+          <span title="prompt tokens">↑ ${fmtCompact(m.prompt_tokens)}</span>
+          <span title="completion tokens">↓ ${fmtCompact(m.completion_tokens)}</span>
+          <span title="total tokens">Σ ${fmtCompact(m.total_tokens)}</span>
+          <span class="ml-auto" title="estimated cost">${fmtCost(m.estimated_cost)}</span>
         </div>
       </div>
     `).join('');

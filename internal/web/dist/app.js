@@ -70,6 +70,20 @@ function fmtNum(n) {
   return new Intl.NumberFormat('en-US').format(n || 0);
 }
 
+function fmtCompact(n) {
+  n = n || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function fmtCost(n) {
+  if (!n || n === 0) return '$0.00';
+  if (n < 0.01) return '<$0.01';
+  return '$' + n.toFixed(2);
+}
+
 function fmtDuration(seconds) {
   const s = Math.floor(seconds || 0);
   const d = Math.floor(s / 86400);
