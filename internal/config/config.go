@@ -116,6 +116,12 @@ type Config struct {
 	//   - "header:value"                → sent as-is on that header
 	UpstreamAPIKeys []string `yaml:"upstream_api_keys"`
 
+	// Gateway API keys (comma-separated). When set, all /v1/* endpoints
+	// require the client to send "Authorization: Bearer <key>" with one of
+	// these keys; requests without a valid key get 401 authentication_error.
+	// Empty (default) keeps /v1/* open to everyone.
+	GatewayAPIKeys []string `yaml:"gateway_api_keys"`
+
 	// Model list filter: only models whose name contains this substring are
 	// returned by /v1/models (case-insensitive). Empty string disables.
 	ModelFilter string `yaml:"model_filter" env:"MODEL_FILTER"`
@@ -238,6 +244,13 @@ func (c *Config) applyEnvOverrides() {
 		for _, k := range strings.Split(v, ",") {
 			if k = strings.TrimSpace(k); k != "" {
 				c.UpstreamAPIKeys = append(c.UpstreamAPIKeys, k)
+			}
+		}
+	}
+	if v := os.Getenv("GATEWAY_API_KEYS"); v != "" {
+		for _, k := range strings.Split(v, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				c.GatewayAPIKeys = append(c.GatewayAPIKeys, k)
 			}
 		}
 	}

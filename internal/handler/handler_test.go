@@ -653,3 +653,352 @@ func TestOpenCodeModeRelay(t *testing.T) {
 		t.Error("OpenCode Server was never hit on POST /session/:id/message — proxy tunnel unused")
 	}
 }
+
+// --- OpenAI-standard API compliance tests ---
+
+// newTestGateway builds a full handler wired to a stub upstream through the
+// in-test SOCKS5 server, mirroring TestHandleModelsEndToEnd. cfgMut may
+// adjust config (e.g. gateway keys) before the handler is constructed.
+func newTestGateway(t testing.TB, upstreamURL string, cfgMut ...func(*config.Config)) http.Handler {
+	socksAddr, stop := startSocks5(t)
+	t.Cleanup(stop)
+
+	cfg := config.DefaultConfig()
+	cfg.UpstreamBaseURL = upstreamURL
+	cfg.UpstreamAPIKey = "zent-test-key"
+	cfg.MaxRetries = 0
+	cfg.ProxyPoolSize = 1
+	cfg.ModelFilter = ""
+	for _, f := range cfgMut {
+		f(cfg)
+	}
+
+	log := testLogger()
+	mgr := &fakeManager{proxies: []*proxy.Proxy{
+		{ID: "p1", SOCKS5Addr: "socks5://" + socksAddr, State: proxy.StateIdle},
+	}}
+	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
+	pool.Start(context.Background())
+
+	return New(cfg, pool, nil, log)
+}
+
+// openAIErrorBody parses the standard {"error": {...}} envelope.
+type openAIErrorBody struct {
+	Error struct {
+		Message string  `json:"message"`
+		Type    string  `json:"type"`
+		Param   *string `json:"param"`
+		Code    *string `json:"code"`
+	} `json:"error"`
+}
+
+func decodeOpenAIError(t *testing.T, res *http.Response) openAIErrorBody {
+	t.Helper()
+	var e openAIErrorBody
+	if err := json.NewDecoder(res.Body).Decode(&e); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	return e
+}
+
+// TestOpenAIErrorEnvelopeInvalidJSON verifies the error envelope shape and
+// type attribution for malformed request bodies.
+func TestOpenAIErrorEnvelopeInvalidJSON(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+	srv := httptest.NewServer(newTestGateway(t, upstream.URL))
+	defer srv.Close()
+
+	res, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader("{not json"))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", res.StatusCode)
+	}
+	e := decodeOpenAIError(t, res)
+	if e.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type = %q, want invalid_request_error", e.Error.Type)
+	}
+	if e.Error.Code == nil || *e.Error.Code != "invalid_json" {
+		t.Errorf("error.code = %v, want invalid_json", e.Error.Code)
+	}
+	if e.Error.Param != nil {
+		t.Errorf("error.param = %q, want null", *e.Error.Param)
+	}
+	if e.Error.Message == "" {
+		t.Error("error.message is empty")
+	}
+}
+
+// TestChatCompletionsValidation covers required-field validation with param
+// attribution per the OpenAI API.
+func TestChatCompletionsValidation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be reached for invalid requests")
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(newTestGateway(t, upstream.URL))
+	defer srv.Close()
+
+	tests := []struct {
+		name      string
+		body      string
+		wantParam string
+	}{
+		{name: "missing model", body: `{"messages":[{"role":"user","content":"hi"}]}`, wantParam: "model"},
+		{name: "blank model", body: `{"model":" ","messages":[{"role":"user","content":"hi"}]}`, wantParam: "model"},
+		{name: "empty messages", body: `{"model":"m","messages":[]}`, wantParam: "messages"},
+		{name: "bad role", body: `{"model":"m","messages":[{"role":"wizard","content":"hi"}]}`, wantParam: "messages[0].role"},
+		{name: "missing content", body: `{"model":"m","messages":[{"role":"user"}]}`, wantParam: "messages[0].content"},
+		{name: "null content user", body: `{"model":"m","messages":[{"role":"user","content":null}]}`, wantParam: "messages[0].content"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", res.StatusCode)
+			}
+			e := decodeOpenAIError(t, res)
+			if e.Error.Type != "invalid_request_error" {
+				t.Errorf("error.type = %q, want invalid_request_error", e.Error.Type)
+			}
+			if e.Error.Param == nil || *e.Error.Param != tt.wantParam {
+				t.Errorf("error.param = %v, want %q", e.Error.Param, tt.wantParam)
+			}
+		})
+	}
+}
+
+// TestAssistantNullContentAllowed verifies assistant messages with null
+// content (tool-call turns) pass validation.
+func TestAssistantNullContentAllowed(t *testing.T) {
+	var sawModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawModel = r.Header.Get("X-Test-Model")
+		w.Write([]byte(`{"id":"1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(newTestGateway(t, upstream.URL))
+	defer srv.Close()
+
+	body := `{"model":"m1","messages":[{"role":"assistant","content":null,"tool_calls":[]}]}`
+	res, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(res.Body)
+		t.Fatalf("expected 200 for null-content assistant message, got %d: %s", res.StatusCode, raw)
+	}
+	_ = sawModel
+}
+
+// TestChatCompletionsUnsupportedContentType verifies the 415 path.
+func TestChatCompletionsUnsupportedContentType(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+	srv := httptest.NewServer(newTestGateway(t, upstream.URL))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "text/plain")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected 415, got %d", res.StatusCode)
+	}
+	e := decodeOpenAIError(t, res)
+	if e.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type = %q, want invalid_request_error", e.Error.Type)
+	}
+}
+
+// TestV1FallbackJSON verifies unknown /v1 paths return JSON 404 and wrong
+// methods return JSON 405 instead of Go's plain-text responses.
+func TestV1FallbackJSON(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+	srv := httptest.NewServer(newTestGateway(t, upstream.URL))
+	defer srv.Close()
+
+	// Unknown path → 404 invalid_request_error with code unknown_url.
+	res, err := http.Get(srv.URL + "/v1/does-not-exist")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", res.StatusCode)
+	}
+	e := decodeOpenAIError(t, res)
+	if e.Error.Type != "invalid_request_error" || e.Error.Code == nil || *e.Error.Code != "unknown_url" {
+		t.Errorf("unexpected envelope: %+v", e.Error)
+	}
+
+	// Wrong method → 405.
+	res, err = http.Get(srv.URL + "/v1/chat/completions")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", res.StatusCode)
+	}
+	if allow := res.Header.Get("Allow"); !strings.Contains(allow, "POST") {
+		t.Errorf("Allow header = %q, want it to include POST", allow)
+	}
+	e = decodeOpenAIError(t, res)
+	if e.Error.Code == nil || *e.Error.Code != "method_not_allowed" {
+		t.Errorf("unexpected envelope: %+v", e.Error)
+	}
+}
+
+// TestGatewayAPIKeyAuth verifies GATEWAY_API_KEYS gating on /v1/* only:
+// missing/wrong key → 401 authentication_error; valid key passes; non-/v1
+// endpoints stay open.
+func TestGatewayAPIKeyAuth(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"object":"list","data":[{"id":"gpt-5.1","object":"model"}]}`))
+	}))
+	defer upstream.Close()
+
+	h := newTestGateway(t, upstream.URL, func(c *config.Config) {
+		c.GatewayAPIKeys = []string{"sk-gateway-1"}
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// No key → 401.
+	res, err := http.Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without key, got %d", res.StatusCode)
+	}
+	e := decodeOpenAIError(t, res)
+	res.Body.Close()
+	if e.Error.Type != "authentication_error" || e.Error.Code == nil || *e.Error.Code != "invalid_api_key" {
+		t.Errorf("unexpected envelope: %+v", e.Error)
+	}
+
+	// Wrong key → 401.
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-wrong")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong key, got %d", res.StatusCode)
+	}
+
+	// Valid key → relays upstream list.
+	req, _ = http.NewRequest("GET", srv.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-gateway-1")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with valid key, got %d", res.StatusCode)
+	}
+
+	// Non-/v1 endpoint stays open without a key.
+	res, err = http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected /health to be open, got %d", res.StatusCode)
+	}
+}
+
+// TestModelRetrieve verifies GET /v1/models/{id} returns the matching entry
+// or a 404 with code model_not_found.
+func TestModelRetrieve(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"object":"list","data":[{"id":"gpt-5.1","object":"model"},{"id":"m2","object":"model"}]}`))
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(newTestGateway(t, upstream.URL))
+	defer srv.Close()
+
+	// Found → returns the single model object.
+	res, err := http.Get(srv.URL + "/v1/models/gpt-5.1")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	var m map[string]any
+	json.NewDecoder(res.Body).Decode(&m)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || m["id"] != "gpt-5.1" {
+		t.Fatalf("expected 200 with id gpt-5.1, got %d: %v", res.StatusCode, m)
+	}
+
+	// Missing → 404 code model_not_found.
+	res, err = http.Get(srv.URL + "/v1/models/nope")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", res.StatusCode)
+	}
+	e := decodeOpenAIError(t, res)
+	if e.Error.Code == nil || *e.Error.Code != "model_not_found" {
+		t.Errorf("unexpected envelope: %+v", e.Error)
+	}
+}
+
+// TestStreamIncludeUsageSynthesis verifies that when the client requests
+// stream_options.include_usage and the upstream sends a terminal usage chunk,
+// it is relayed; when the upstream omits usage entirely but we know token
+// counts from an earlier chunk, none is fabricated (no data = no guess).
+func TestStreamUsageChunkRelay(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, chunk := range []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}` + "\n\n",
+			`data: {"id":"1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}` + "\n\n",
+			"data: [DONE]\n\n",
+		} {
+			w.Write([]byte(chunk))
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(newTestGateway(t, upstream.URL))
+	defer srv.Close()
+
+	body := `{"model":"m1","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true}}`
+	res, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	raw, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(raw), `"total_tokens":5`) {
+		t.Errorf("usage chunk not relayed: %s", raw)
+	}
+	if !strings.Contains(res.Header.Get("X-Accel-Buffering"), "no") {
+		t.Errorf("missing X-Accel-Buffering: no header")
+	}
+}

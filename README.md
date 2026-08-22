@@ -82,6 +82,7 @@ If a certificate key conflicts (409/2500), the gateway regenerates the Ed25519 k
 | `UPSTREAM_BASE_URL` | Upstream API base URL (OpenAI-compatible, `/v1` auto-appended if missing) | `https://opencode.ai/zen/v1` |
 | `UPSTREAM_API_KEY` | Upstream API key (OpenCode Zen: `zent-...`). Leave empty for the public tier — the gateway then authenticates with `x-api-key: public` | - |
 | `UPSTREAM_API_KEYS` | Comma-separated key list; a **random** key is picked per request (when the client sends no `Authorization`) to spread quota/rate limits across accounts. Entries: `public`, `zent-...`, or `header:value` | - |
+| `GATEWAY_API_KEYS` | Comma-separated gateway keys. When set, `/v1/*` requires `Authorization: Bearer <key>` (401 otherwise); empty keeps the API open | - |
 | `UPSTREAM_PROVIDER` | Upstream driver: `zen` (default, raw OpenAI-compatible), `opencode` (drive an [OpenCode Server](https://opencode.ai/docs/server) via HTTP) or `opencode-cli` (docker-exec `opencode run` inside each VPN container). In all cases each request egresses through a unique per-container VPN IP | `zen` |
 | `OPENCODE_SERVER_URL` | Base URL of `opencode serve` (used when `UPSTREAM_PROVIDER=opencode`). Must be reachable through the proxy container's SOCKS5 tunnel | `http://127.0.0.1:4096` |
 | `OPENCODE_SERVER_PASSWORD` | Optional `OPENCODE_SERVER_PASSWORD` for OpenCode Server basic auth (`opencode`-mode) | - |
@@ -152,7 +153,9 @@ Open `http://localhost:8082` in your browser:
 POST /v1/chat/completions
 ```
 
-Compatible with OpenAI's chat completion API.
+Compatible with OpenAI's chat completion API. Errors follow the OpenAI envelope (`{"error": {"message", "type", "param", "code"}}`); invalid requests return `400` with the offending field in `param`; unknown `/v1/*` URLs return JSON 404 and wrong methods JSON 405. Streaming relays `reasoning_content` deltas, honors `stream_options.include_usage`, and emits an in-band SSE error event if the upstream breaks mid-stream.
+
+**Retrieve model:** `GET /v1/models/{id}` returns a single model object or `404` with code `model_not_found`.
 
 **Example (non-streaming):**
 ```bash
