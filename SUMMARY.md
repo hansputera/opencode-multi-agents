@@ -1,14 +1,16 @@
 # Project Summary
 
-## OpenAI-Compatible API Gateway with Automatic Region Rotation
+## OpenAI-Compatible API Gateway with Automatic IP Rotation
 
-A lightweight, performant API gateway built in Go that provides OpenAI-compatible endpoints with automatic region rotation using ProtonVPN WireGuard containers.
+A lightweight, performant API gateway built in Go that provides OpenAI-compatible endpoints with automatic IP rotation using ProtonVPN native WireGuard tunnels (SRP authentication + per-container certificates).
 
 ### ✅ Completed Implementation
 
 #### Core Features
 - ✅ OpenAI-compatible API endpoints (`/v1/chat/completions`, `/v1/models`)
-- ✅ Automatic region rotation through ProtonVPN containers on rate limit
+- ✅ Native ProtonVPN integration: SRP login, certificate issuance, X25519 key derivation — no manual key files
+- ✅ Server spreading: containers distributed across different ProtonVPN servers for diverse exit IPs
+- ✅ Automatic region/server rotation on rate limit
 - ✅ Rate limit detection (HTTP 429 + keyword matching)
 - ✅ Automatic retry with exponential backoff
 - ✅ Server-Sent Events (SSE) streaming support
@@ -16,12 +18,17 @@ A lightweight, performant API gateway built in Go that provides OpenAI-compatibl
 - ✅ Health monitoring with background checks
 - ✅ Thread-safe proxy pool management
 - ✅ Graceful shutdown
+- ✅ Token usage tracking with per-model cost estimation (`MODEL_PRICING`)
+- ✅ Web dashboard (neobrutalism UI) + Chat UI, SQLite-backed metrics
+- ✅ Prometheus `/metrics` endpoint
 
 #### Technical Stack
 - **Language**: Go 1.26
 - **Logging**: zerolog (structured logging)
 - **Container Management**: Docker Go SDK
 - **Networking**: golang.org/x/net/proxy (SOCKS5)
+- **Storage**: SQLite (modernc.org/sqlite — pure Go, CGO-free) for credentials, certificates and request metrics
+- **VPN**: ProtonVPN WireGuard via `wg-quick`, gost SOCKS5 sidecar
 - **Configuration**: Environment variables + YAML
 
 #### Project Structure
@@ -33,29 +40,39 @@ opencode-multi-agents/
 │   ├── config/              # Configuration management
 │   │   ├── config.go
 │   │   └── config_test.go
-│   ├── handler/             # HTTP handlers
-│   │   └── handler.go       # OpenAI-compatible endpoints
+│   ├── handler/             # HTTP handlers (API + dashboard payload)
+│   │   ├── handler.go
+│   │   └── handler_test.go
 │   ├── logger/              # Structured logging
 │   │   └── logger.go
+│   ├── metrics/             # SQLite metrics store, token pricing, Prometheus exporter
+│   │   ├── metrics.go
+│   │   ├── pricing.go
+│   │   └── prometheus.go
+│   ├── protonvpn/           # ProtonVPN native client: SRP auth, certs, server list
+│   │   ├── auth.go          # SRP login flow + session/cookie management
+│   │   ├── client.go        # Server selection, certificate issuance, key derivation
+│   │   ├── store.go         # SQLite store (credentials/sessions/certs/cache)
+│   │   └── types.go         # API types
 │   ├── proxy/               # Proxy pool management
-│   │   ├── docker.go        # Docker container manager
+│   │   ├── docker.go        # Docker container manager (WireGuard + gost)
 │   │   ├── pool.go          # Pool manager with state machine
-│   │   ├── types.go         # Core types and interfaces
+│   │   ├── assets/          # Dockerfile + entrypoint for VPN containers
+│   │   ├── types.go
 │   │   └── types_test.go
-│   └── upstream/            # Upstream provider client
-│       └── client.go        # SOCKS5 HTTP client
-├── bin/                     # Compiled binary (12MB)
-├── docker-compose.yml       # Multi-container setup
+│   ├── upstream/            # Upstream provider clients (zen/opencode/opencode-cli)
+│   └── web/                 # Embedded web UI (dashboard + chat)
+├── bin/                     # Compiled binary (~20MB)
+├── docker-compose.yml       # Gateway service (host networking)
 ├── Dockerfile              # Gateway container image
 ├── Makefile                # Build automation
 ├── README.md               # Complete documentation
 ├── .env.example            # Configuration template
-├── .gitignore
-└── test.sh                 # Integration test script
+└── .gitignore
 ```
 
 #### Binary Size
-- **Size**: 12MB (single binary, no dependencies)
+- **Size**: ~20MB (single binary, no dependencies)
 - **Memory**: ~10-20MB idle (minimal footprint)
 - **Startup**: < 5 seconds
 
@@ -74,8 +91,8 @@ opencode-multi-agents/
 - Configurable cooldown duration
 
 **3. Docker Integration**
-- Automatic ProtonVPN container lifecycle management
-- Health checks via icanhazip.com
+- Automatic ProtonVPN WireGuard container lifecycle management
+- Health checks via icanhazip.com through each container's SOCKS5 port
 - Resource limits per container (CPU, memory)
 - Orphan cleanup on startup
 
@@ -85,14 +102,23 @@ opencode-multi-agents/
 - Exponential backoff retry
 - Streaming response support
 
+**5. Token Metrics & Cost Estimation**
+- Token usage extracted from streaming and non-streaming responses
+- Per-model pricing via `MODEL_PRICING` (per-1M-token rates)
+- Cost stored per request; aggregated totals and per-model breakdowns on the dashboard
+- Prometheus counters for tokens by model
+
 #### Configuration Options
 - Proxy pool size (1-20 containers)
+- ProtonVPN credentials, regions and API endpoints
 - Rate limit cooldown (duration)
 - Max retries (0-10)
 - Request timeout
 - CPU/memory limits per container
 - Sticky session TTL
 - Log level and format
+- Model pricing for cost estimation
+- Model list filter
 
 #### Testing
 - ✅ Unit tests for config and proxy modules
@@ -107,7 +133,7 @@ make build
 
 # Configure
 cp .env.example .env
-# Edit UPSTREAM_BASE_URL and UPSTREAM_API_KEY
+# Edit PROTONVPN_USERNAME, PROTONVPN_PASSWORD and UPSTREAM_* settings
 
 # Run
 ./bin/gateway
@@ -153,7 +179,7 @@ curl http://localhost:8082/stats
 
 ### 🎯 Design Goals Achieved
 
-✅ **Lightweight**: Single 12MB binary, minimal memory footprint
+✅ **Lightweight**: Single ~20MB binary, minimal memory footprint
 ✅ **Performant**: Concurrent request handling, low latency
 ✅ **Reliable**: Automatic recovery, health monitoring
 ✅ **Simple**: Easy configuration, clear architecture
@@ -169,7 +195,7 @@ curl http://localhost:8082/stats
 ### 🔄 Rate Limit Flow
 
 ```
-Request → Get Proxy → Forward → 429? → Ban Region → Get New Proxy (Different Region) → Retry
+Request → Get Proxy → Forward → 429? → Ban IP/Region → Replacement Proxy (Different Server/Region) → Retry
                                 ↓
                             No 429 → Return Response
 ```
@@ -196,9 +222,11 @@ To complete the project:
 1. **Smart Rate Limit Detection**: Not just HTTP 429, but also keyword matching in response bodies
 2. **Sticky Sessions**: Same conversation uses same IP for consistency
 3. **Zero-Downtime Rotation**: New proxies created while old ones cool down
-4. **Region Rotation**: Automatically switches ProtonVPN regions on rate limit
-5. **Resource Efficient**: Each VPN container limited to 0.25 CPU and 512MB RAM
-6. **Comprehensive Observability**: Health, stats, and structured logging
+4. **Server & Region Rotation**: Containers spread across different ProtonVPN servers; banned regions/servers avoided automatically
+5. **Native ProtonVPN Auth**: SRP login + certificate issuance with derived WireGuard keys — fully automated
+6. **Token Metrics**: Per-model token usage and cost estimation on the dashboard and via Prometheus
+7. **Resource Efficient**: Each VPN container limited to 0.25 CPU and 512MB RAM
+8. **Comprehensive Observability**: Health, stats, Prometheus `/metrics`, and structured logging
 
 ---
 

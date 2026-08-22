@@ -5,14 +5,17 @@ Lightweight and performant API gateway that provides OpenAI-compatible endpoints
 ## Features
 
 - **OpenAI-Compatible API**: Drop-in replacement for OpenAI API clients
-- **Automatic Region Rotation**: Rotates through ProtonVPN regions on rate limit
+- **Automatic IP Rotation**: Rotates through ProtonVPN regions *and* spreads containers across different servers for diverse exit IPs
+- **Native ProtonVPN WireGuard**: SRP username/password authentication with automatic certificate issuance and X25519 key derivation — no manual key files
 - **Rate Limit Detection**: Automatically detects and handles rate limits (429 errors)
 - **Streaming Support**: Full support for Server-Sent Events (SSE) streaming
 - **Retry Logic**: Exponential backoff with configurable retries
 - **Sticky Sessions**: Optional conversation-based session persistence
 - **Health Monitoring**: Background health checks for all proxies
+- **Token Metrics & Cost Estimation**: Per-request token usage (prompt/completion/cached) and configurable per-model cost estimation
+- **Prometheus Endpoint**: `/metrics` with request/token counters
 - **Resource Efficient**: Minimal memory footprint, fast startup
-- **Web Dashboard**: Neobrutalism-styled UI with live metrics, traffic chart, and model usage (SQLite-backed)
+- **Web Dashboard**: Neobrutalism-styled UI with live metrics, traffic chart, model usage, token totals and estimated cost (SQLite-backed)
 - **Chat UI**: ChatGPT-like interface with SSE streaming and sticky-session conversations
 
 ## Quick Start
@@ -22,7 +25,7 @@ Lightweight and performant API gateway that provides OpenAI-compatible endpoints
 - Go 1.20+ (for building from source)
 - Docker (for running VPN containers)
 - Docker Compose (optional, for easy deployment)
-- ProtonVPN account with WireGuard keys
+- A ProtonVPN account (free tier works)
 
 ### Installation
 
@@ -43,11 +46,10 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
-4. Create the ProtonVPN keys directory:
+4. Set your ProtonVPN credentials in `.env`:
 ```bash
-mkdir -p protonvpn-keys
-# Add your WireGuard private key files (one per region)
-# Example: protonvpn-keys/nl-01.key, protonvpn-keys/de-01.key
+PROTONVPN_USERNAME=your-protonvpn-username
+PROTONVPN_PASSWORD=your-protonvpn-password
 ```
 
 5. Run the gateway:
@@ -57,28 +59,16 @@ mkdir -p protonvpn-keys
 
 ## ProtonVPN Setup
 
-### Generating WireGuard Keys
+The gateway authenticates to ProtonVPN natively — no manual WireGuard config downloads needed:
 
-1. Log in to [ProtonVPN](https://protonvpn.com)
-2. Go to **Downloads** → **WireGuard configuration**
-3. Enter a name for the key and select your features
-4. Download the configuration file
-5. Extract the `PrivateKey` value and save it to a `.key` file
+1. The gateway performs a full **SRP login flow** against `account.protonvpn.com` (session → cookies → SRP proof → user info), matching what the ProtonVPN web app does.
+2. It fetches the **server list** from `vpn-api.proton.me` and picks online free servers in your configured regions (`PROTONVPN_REGIONS`).
+3. For each proxy container it requests a **VPN certificate** with an auto-generated Ed25519 key pair, then derives the WireGuard **X25519** key from it (required — independently generated keys are silently dropped by ProtonVPN servers).
+4. Each container brings up a `wg-quick` tunnel plus a `gost` SOCKS5 sidecar; all upstream traffic egresses through the tunnel.
 
-### Key File Organization
+Credentials, sessions, certificates, and server cache are persisted in SQLite (`PROTONVPN_STORE_PATH`), so restarts don't re-authenticate unnecessarily.
 
-Organize key files by region in the `protonvpn-keys/` directory:
-
-```
-protonvpn-keys/
-├── nl-01.key        # Netherlands
-├── nl-02.key        # Another Netherlands server
-├── de-01.key        # Germany
-├── us-01.key        # United States
-└── se-01.key        # Sweden
-```
-
-The filename (without `.key` extension) becomes the region identifier. When rate-limited, the gateway rotates to a different region.
+If a certificate key conflicts (409/2500), the gateway regenerates the Ed25519 key automatically. Certificate creation is serialized to avoid churn.
 
 ## Configuration
 
@@ -101,9 +91,13 @@ The filename (without `.key` extension) becomes the region identifier. When rate
 | `OPENCODE_CLI_MODELS` | Comma-separated model list for `/v1/models` (empty = live `opencode models` output) | - |
 | `PROXY_POOL_SIZE` | Number of VPN containers | `3` |
 | `PROXY_BASE_PORT` | Starting port for VPN containers | `10801` |
-| `VPN_IMAGE` | Docker image for VPN (protonwire + gost) | `ghcr.io/tprasadtp/protonwire:latest` |
-| `PROTONVPN_PRIVATE_KEY_DIR` | Directory containing WireGuard private key files | `./protonvpn-keys` |
-| `PROTONVPN_SERVER` | Default ProtonVPN server | `node-nl-01.protonvpn.net` |
+| `VPN_IMAGE` | Docker image for VPN containers (wireguard-tools + gost SOCKS5) | `ghcr.io/tprasadtp/protonwire:latest` |
+| `PROTONVPN_USERNAME` | ProtonVPN username (OpenVPN/OpenVPN-IKEv2 credential from account dashboard) | - |
+| `PROTONVPN_PASSWORD` | ProtonVPN password | - |
+| `PROTONVPN_API_BASE` | ProtonVPN account API (SRP auth, certificates) | `https://account.protonvpn.com` |
+| `PROTONVPN_VPN_API_BASE` | ProtonVPN VPN API (server list) | `https://vpn-api.proton.me` |
+| `PROTONVPN_STORE_PATH` | SQLite path for credentials/sessions/certificates/server cache | `data/protonvpn.db` |
+| `PROTONVPN_REGIONS` | Comma-separated country codes for server selection (e.g. `NL,US,JP,DE`) | `NL,US,JP,DE` |
 | `PROTONVPN_IP_CHECK_URL` | URL to verify egress IP | `https://icanhazip.com/` |
 | `RATE_LIMIT_COOLDOWN` | Cooldown duration after rate limit | `5m` |
 | `RATE_LIMIT_RETRY_AFTER` | `Retry-After` seconds returned to clients when upstream keeps rate limiting across all retries (responds `429` instead of `502`) | `60` |
@@ -111,7 +105,7 @@ The filename (without `.key` extension) becomes the region identifier. When rate
 | `RATE_LIMIT_FRESH_IP_WAIT` | Per-request max wait for a fresh, unbanned proxy to boot after all pool IPs are rate limited | `90s` |
 | `HEALTH_CHECK_PERIOD` | Health check interval | `30s` |
 | `RESOURCE_CPU_LIMIT` | CPU limit per container | `0.25` |
-| `RESOURCE_MEMORY_LIMIT` | Memory limit per container | `512M` (below ~256M causes WARP OOM-kill, exit 137) |
+| `RESOURCE_MEMORY_LIMIT` | Memory limit per container | `512M` (below ~256M can cause WireGuard OOM-kill, exit 137) |
 | `MAX_RETRIES` | Maximum retry attempts | `3` |
 | `RETRY_BASE_DELAY` | Base delay for exponential backoff | `1s` |
 | `RETRY_MAX_DELAY` | Maximum delay between retries | `30s` |
@@ -121,7 +115,9 @@ The filename (without `.key` extension) becomes the region identifier. When rate
 | `LOG_FORMAT` | Log format (json, console) | `json` |
 | `REQUEST_TIMEOUT` | Request timeout | `60s` |
 | `METRICS_DB_PATH` | SQLite database path for request metrics | `data/metrics.db` |
+| `MODEL_PRICING` | Per-1M-token pricing for cost estimation. Format: `model:input,output,cached;model2:input,output` (cached optional, defaults to input × 0.5). Rates in USD per 1M tokens | - |
 | `MODEL_FILTER` | Keep only models whose name contains this substring in `/v1/models` (case-insensitive; empty disables) | `-free` |
+| `CORS_ORIGIN` | Allowed CORS origin for API responses | `*` |
 
 ### Configuration File
 
@@ -141,8 +137,10 @@ log_format: "console"
 
 Open `http://localhost:8082` in your browser:
 
-- **Dashboard** (`#/dashboard`): live metrics — total requests, success rate, avg latency, errors, uptime, per-minute traffic chart, per-model usage counts, and proxy pool status with each container's egress IP (duplicate IPs flagged). Auto-refreshes every 5 seconds.
+- **Dashboard** (`#/dashboard`): live metrics — total requests, success rate, avg latency, **total tokens** (prompt in / completion out), **estimated cost** (with cached-token count), streaming requests, errors, uptime, per-minute traffic chart, per-model usage with per-model token counts and cost, and proxy pool status showing each container's state and egress IP (duplicate IPs flagged). Auto-refreshes every 5 seconds.
 - **Chat** (`#/chat`): a ChatGPT-like interface with model selection, SSE streaming responses, and per-conversation sticky sessions (`conversation_id` handled automatically).
+
+> Token metrics require `MODEL_PRICING` to be set for cost estimation; token counts are always recorded. Unknown models estimate at $0.
 
 ## API Endpoints
 
@@ -233,7 +231,13 @@ Returns statistics about the proxy pool.
 curl http://localhost:8082/api/metrics
 ```
 
-Returns the dashboard payload: aggregated totals (requests, errors, success rate, avg latency, uptime), per-minute traffic series, per-model usage counts, pool statistics, and per-proxy details. Persisted in SQLite (see `METRICS_DB_PATH`).
+Returns the dashboard payload: aggregated totals (requests, errors, success rate, avg latency, uptime, total/prompt/completion/cached tokens, estimated cost), per-minute traffic series, per-model usage with token counts and cost, pool statistics, and per-proxy details. Persisted in SQLite (see `METRICS_DB_PATH`), pruned after 7 days.
+
+```bash
+curl http://localhost:8082/metrics
+```
+
+Prometheus exposition format: request counters by model/status, token counters (prompt/completion/total), latency histograms, and pool gauges.
 
 ```bash
 curl http://localhost:8082
@@ -241,16 +245,12 @@ curl http://localhost:8082
 
 Serves the embedded web UI (dashboard + chat).
 
-```bash
-curl http://localhost:8082/stats
-```
-
 ## Docker Compose Deployment
 
 ```bash
-# Create keys directory with your WireGuard keys
-mkdir -p protonvpn-keys
-# Add your .key files here
+# Set your ProtonVPN credentials in .env first:
+#   PROTONVPN_USERNAME=...
+#   PROTONVPN_PASSWORD=...
 
 # Start the gateway
 docker compose up -d --build
@@ -279,7 +279,7 @@ Set `UPSTREAM_PROVIDER=opencode` to route requests through an [OpenCode Server](
 - **Sessions**: one OpenCode session is created per request. Multi-message continuity within a single conversation is a follow-up (sticky session ids would key a persistent session).
 
 ```bash
-# Run your own OpenCode Server, then have the gateway egress through WARP
+# Run your own OpenCode Server, then have the gateway egress through ProtonVPN
 opencode serve --port 4121 --hostname 0.0.0.0 &
 UPSTREAM_PROVIDER=opencode OPENCODE_SERVER_URL=http://<reachable-host>:4121 \
   OPENCODE_PROVIDER_ID=openai OPENCODE_MODEL=gpt-5.1-codex \
@@ -307,21 +307,21 @@ curl -s http://localhost:8082/v1/chat/completions \
   -d '{"model":"claude-sonnet-4","messages":[{"role":"user","content":"what is my egress IP?"}],"stream":true}'
 ```
 
-## Region Rotation & Verification
+## IP Diversity & Rotation
 
-All containers initially use the same ProtonVPN region (same egress IP). When the upstream returns a rate limit (429), the gateway:
+New containers are spread across **different ProtonVPN servers** within the configured regions, so pool proxies get exit IPs from different subnets. When the upstream returns a rate limit (429), the gateway:
 
-1. Bans the current region for `IP_BAN_DURATION`
-2. Rotates new containers to a different region from the key directory
-3. Different region = different egress IP
+1. Bans the responsible egress IP and region for `max(IP_BAN_DURATION, upstream Retry-After)`
+2. Spins up a replacement container on a **different server** (already-used servers are avoided when selecting)
+3. Different server = different egress IP subnet
 
 Check that all containers are reachable:
 
 ```bash
 make check-ips
 # or: PROXY_BASE_PORT=10801 PROXY_POOL_SIZE=3 bash scripts/check-ips.sh
-# port 10801: ip=1.2.3.4
-# port 10802: ip=1.2.3.4
+# port 10801: ip=185.107.56.50
+# port 10802: ip=195.242.214.98
 # ...
 # OK: all proxies are reachable
 ```
@@ -411,7 +411,7 @@ RESOURCE_MEMORY_LIMIT=256M
 MAX_CONCURRENT=50
 ```
 
-> `RESOURCE_MEMORY_LIMIT` below ~256M causes the WARP container to be OOM-killed (exit 137).
+> `RESOURCE_MEMORY_LIMIT` below ~256M can cause the VPN container to be OOM-killed (exit 137).
 
 ## Supported Upstream Providers
 
