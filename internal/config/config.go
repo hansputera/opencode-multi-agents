@@ -62,6 +62,7 @@ type Config struct {
 	ProtonVPNUsername  string `yaml:"protonvpn_username" env:"PROTONVPN_USERNAME"`
 	ProtonVPNPassword  string `yaml:"protonvpn_password" env:"PROTONVPN_PASSWORD"`
 	ProtonVPNAPIBase   string `yaml:"protonvpn_api_base" env:"PROTONVPN_API_BASE"`
+	ProtonVPNVpnAPIBase string `yaml:"protonvpn_vpn_api_base" env:"PROTONVPN_VPN_API_BASE"`
 	ProtonVPNStorePath string `yaml:"protonvpn_store_path" env:"PROTONVPN_STORE_PATH"`
 	ProtonVPNRegions   string `yaml:"protonvpn_regions" env:"PROTONVPN_REGIONS"`
 	ProtonVPNIPCheckURL string `yaml:"protonvpn_ip_check_url" env:"PROTONVPN_IP_CHECK_URL"`
@@ -132,6 +133,7 @@ func DefaultConfig() *Config {
 		ProxyBasePort:       10801,
 		VPNImage:            "ghcr.io/tprasadtp/protonwire:latest",
 		ProtonVPNAPIBase:    "https://account.protonvpn.com",
+		ProtonVPNVpnAPIBase: "https://vpn-api.proton.me",
 		ProtonVPNStorePath:  "data/protonvpn.db",
 		ProtonVPNRegions:    "NL,US,JP,DE",
 		ProtonVPNIPCheckURL: "https://icanhazip.com/",

@@ -73,7 +73,7 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 	}
 
 	// Initialize ProtonVPN client
-	protonClient := protonvpn.NewClient(store, cfg.ProtonVPNAPIBase, cfg.ProtonVPNUsername, cfg.ProtonVPNPassword, log)
+	protonClient := protonvpn.NewClient(store, cfg.ProtonVPNAPIBase, cfg.ProtonVPNVpnAPIBase, cfg.ProtonVPNUsername, cfg.ProtonVPNPassword, log)
 
 	// Try to login with provided credentials (will store them in database)
 	if err := protonClient.Login(cfg.ProtonVPNUsername, cfg.ProtonVPNPassword); err != nil {
@@ -162,6 +162,7 @@ func (dm *DockerManager) ensureVPNImage(ctx context.Context) error {
 		}
 
 		dm.log.Info().Str("image", vpnImageTag).Msg("ProtonVPN+gost image built")
+		dm.imageDone = true
 	})
 	return dm.vpnErr
 }
@@ -258,17 +259,39 @@ func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions map[string]
 		return nil, fmt.Errorf("failed to select server: %w", err)
 	}
 
-	// Get or create WireGuard keypair
+	// Get certificate first (creates Ed25519 key if needed)
+	cert, err := dm.protonvpn.GetCertificate(logical.Name, server.EntryIP, server.X25519PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get certificate: %w", err)
+	}
+
+	// Derive WireGuard X25519 keypair from Ed25519 certificate key
 	privateKey, _, err := dm.protonvpn.GetOrCreateKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get wireguard keys: %w", err)
 	}
 
-	// Get certificate (refresh if needed)
-	cert, err := dm.protonvpn.GetCertificate()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get certificate: %w", err)
+	// PeerIP from cert is the SERVER's IP (WireGuard endpoint), NOT client tunnel address
+	// Client tunnel address comes from cert's IPv4 field (e.g., 10.2.0.2/32)
+	// DNS comes from cert's DNS field (ProtonVPN internal DNS)
+	wgClientAddress := cert.IPv4 + "/32"
+	if wgClientAddress == "/32" {
+		wgClientAddress = "10.2.0.2/32" // fallback
 	}
+	wgDNS := "10.2.0.1" // ProtonVPN internal DNS fallback
+	if len(cert.DNS) > 0 {
+		wgDNS = cert.DNS[0]
+	}
+	serverEndpoint := cert.Features.PeerIP + ":51820"
+
+	// Write WireGuard config
+	wgConfig := fmt.Sprintf("[Interface]\nPrivateKey = %s\nAddress = %s\nDNS = %s\n\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n",
+		privateKey,
+		wgClientAddress,
+		wgDNS,
+		cert.Features.PeerPublicKey,
+		serverEndpoint,
+	)
 
 	port := int(dm.nextPort.Add(1))
 	containerName := fmt.Sprintf("%s-%d", dm.namespace, port)
@@ -278,10 +301,11 @@ func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions map[string]
 		Image: vpnImageTag,
 		Env: []string{
 			"WIREGUARD_PRIVATE_KEY=" + privateKey,
-			"WIREGUARD_SERVER_PUBLIC_KEY=" + server.X25519PublicKey,
-			"WIREGUARD_ADDRESS=" + cert.Features.PeerIP + "/32",
-			"WIREGUARD_ENDPOINT=" + server.ExitIP + ":51820",
-			"WIREGUARD_DNS=10.2.0.1",
+			"WIREGUARD_SERVER_PUBLIC_KEY=" + cert.Features.PeerPublicKey,
+			"WIREGUARD_ADDRESS=" + wgClientAddress,
+			"WIREGUARD_ENDPOINT=" + serverEndpoint,
+			"WIREGUARD_DNS=" + wgDNS,
+			"WIREGUARD_CONFIG=" + wgConfig,
 		},
 		ExposedPorts: nat.PortSet{
 			"1080/tcp": struct{}{},
@@ -308,9 +332,11 @@ func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions map[string]
 		},
 		// ProtonVPN needs NET_ADMIN for WireGuard interface management
 		CapAdd: []string{"NET_ADMIN"},
+		Privileged: true,
 		Sysctls: map[string]string{
-			"net.ipv4.conf.all.rp_filter":    "2",
-			"net.ipv6.conf.all.disable_ipv6": "1",
+			"net.ipv4.conf.all.rp_filter":       "2",
+			"net.ipv4.conf.all.src_valid_mark":  "1",
+			"net.ipv6.conf.all.disable_ipv6":    "1",
 		},
 		AutoRemove: false, // We manage removal manually
 	}

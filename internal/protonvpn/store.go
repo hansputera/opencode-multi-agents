@@ -75,6 +75,11 @@ func (s *Store) migrate() error {
 			public_key TEXT NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS ed25519_keys (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			private_key BLOB NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 
 	for _, q := range queries {
@@ -260,6 +265,42 @@ func (s *Store) SetWireGuardKey(privateKey, publicKey string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to set wireguard keys: %w", err)
+	}
+	return nil
+}
+
+// GetEd25519Key retrieves the stored Ed25519 private key
+func (s *Store) GetEd25519Key() ([]byte, error) {
+	var privKeyBytes []byte
+	err := s.db.QueryRow(
+		"SELECT private_key FROM ed25519_keys WHERE id = 1",
+	).Scan(&privKeyBytes)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("no Ed25519 keys stored")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Ed25519 keys: %w", err)
+	}
+	return privKeyBytes, nil
+}
+
+// SetEd25519Key stores an Ed25519 private key
+func (s *Store) SetEd25519Key(privKeyBytes []byte) error {
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO ed25519_keys (id, private_key) VALUES (1, ?)",
+		privKeyBytes,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to set Ed25519 key: %w", err)
+	}
+	return nil
+}
+
+// DeleteEd25519Key deletes the stored Ed25519 key
+func (s *Store) DeleteEd25519Key() error {
+	_, err := s.db.Exec("DELETE FROM ed25519_keys WHERE id = 1")
+	if err != nil {
+		return fmt.Errorf("failed to delete Ed25519 key: %w", err)
 	}
 	return nil
 }

@@ -66,6 +66,9 @@ type CertificateResponse struct {
 	RefreshTime         int64     `json:"RefreshTime"`
 	ServerPublicKey     string    `json:"ServerPublicKey"`
 	ServerPublicKeyMode string    `json:"ServerPublicKeyMode"`
+	IPv4                string    `json:"IPv4"`
+	IPv6                string    `json:"IPv6"`
+	DNS                 []string  `json:"DNS"`
 	Features            Features  `json:"Features"`
 }
 
