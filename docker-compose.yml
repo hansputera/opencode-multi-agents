@@ -24,6 +24,7 @@ services:
       - PROTONVPN_USERNAME=${PROTONVPN_USERNAME}
       - PROTONVPN_PASSWORD=${PROTONVPN_PASSWORD}
       - PROTONVPN_API_BASE=${PROTONVPN_API_BASE:-https://account.protonvpn.com}
+      - PROTONVPN_VPN_API_BASE=${PROTONVPN_VPN_API_BASE:-https://vpn-api.proton.me}
       - PROTONVPN_STORE_PATH=/app/data/protonvpn.db
       - PROTONVPN_REGIONS=${PROTONVPN_REGIONS:-NL,US,JP,DE}
       - PROTONVPN_IP_CHECK_URL=${PROTONVPN_IP_CHECK_URL:-https://icanhazip.com/}
@@ -48,6 +49,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - gateway-data:/app/data
+    group_add:
+      - "990" # docker group for socket access
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${GATEWAY_PORT:-8082}/api/metrics > /dev/null || exit 1"]
