@@ -122,6 +122,18 @@ type Config struct {
 	// Empty (default) keeps /v1/* open to everyone.
 	GatewayAPIKeys []string `yaml:"gateway_api_keys"`
 
+	// Built-in web_search tool. When enabled, chat completion requests get a
+	// web_search function injected; when the model calls it the gateway runs
+	// the search server-side (through the VPN proxy egress) and feeds results
+	// back for another round.
+	WebSearchEnabled     bool          `yaml:"web_search_enabled" env:"WEB_SEARCH_ENABLED"`
+	WebSearchMaxResults  int           `yaml:"web_search_max_results" env:"WEB_SEARCH_MAX_RESULTS"`
+	WebSearchMaxPages    int           `yaml:"web_search_max_pages" env:"WEB_SEARCH_MAX_PAGES"`
+	WebSearchMaxPageChar int           `yaml:"web_search_max_page_chars" env:"WEB_SEARCH_MAX_PAGE_CHARS"`
+	WebSearchMaxRounds   int           `yaml:"web_search_max_rounds" env:"WEB_SEARCH_MAX_ROUNDS"`
+	SearxngURL           string        `yaml:"searxng_url" env:"SEARXNG_URL"`
+	BraveAPIKey          string        `yaml:"brave_api_key" env:"BRAVE_API_KEY"`
+
 	// Model list filter: only models whose name contains this substring are
 	// returned by /v1/models (case-insensitive). Empty string disables.
 	ModelFilter string `yaml:"model_filter" env:"MODEL_FILTER"`
@@ -141,6 +153,11 @@ func DefaultConfig() *Config {
 		ProtonVPNAPIBase:    "https://account.protonvpn.com",
 		ProtonVPNVpnAPIBase: "https://vpn-api.proton.me",
 		ProtonVPNStorePath:  "data/protonvpn.db",
+		WebSearchEnabled:    true,
+		WebSearchMaxResults: 5,
+		WebSearchMaxPages:   2,
+		WebSearchMaxPageChar: 6000,
+		WebSearchMaxRounds:  3,
 		ProtonVPNRegions:    "NL,US,JP,DE",
 		ProtonVPNIPCheckURL: "https://icanhazip.com/",
 		CooldownDuration:    5 * time.Minute,
@@ -253,6 +270,35 @@ func (c *Config) applyEnvOverrides() {
 				c.GatewayAPIKeys = append(c.GatewayAPIKeys, k)
 			}
 		}
+	}
+	if v := os.Getenv("WEB_SEARCH_ENABLED"); v != "" {
+		c.WebSearchEnabled = strings.EqualFold(v, "true") || v == "1" || strings.EqualFold(v, "yes")
+	}
+	if v := os.Getenv("WEB_SEARCH_MAX_RESULTS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.WebSearchMaxResults = i
+		}
+	}
+	if v := os.Getenv("WEB_SEARCH_MAX_PAGES"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.WebSearchMaxPages = i
+		}
+	}
+	if v := os.Getenv("WEB_SEARCH_MAX_PAGE_CHARS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.WebSearchMaxPageChar = i
+		}
+	}
+	if v := os.Getenv("WEB_SEARCH_MAX_ROUNDS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.WebSearchMaxRounds = i
+		}
+	}
+	if v := os.Getenv("SEARXNG_URL"); v != "" {
+		c.SearxngURL = v
+	}
+	if v := os.Getenv("BRAVE_API_KEY"); v != "" {
+		c.BraveAPIKey = v
 	}
 	if v := os.Getenv("PROXY_POOL_SIZE"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {

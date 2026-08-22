@@ -157,6 +157,15 @@ Compatible with OpenAI's chat completion API. Errors follow the OpenAI envelope 
 
 **Retrieve model:** `GET /v1/models/{id}` returns a single model object or `404` with code `model_not_found`.
 
+### Built-in Web Search
+
+The gateway ships a server-side `web_search` tool (enabled by default on the `zen` driver; set `WEB_SEARCH_ENABLED=false` to disable):
+
+- A `web_search(query)` function is injected into chat requests. When the model calls it, the gateway runs the search **through the same rotating VPN proxy** as model traffic, extracts readable text from top pages, and feeds results back — the client just sees the final answer, in both streaming and non-streaming modes.
+- Providers: self-hosted [SearXNG](https://docs.searxng.org/) (`SEARXNG_URL`), Brave Search API (`BRAVE_API_KEY`), or keyless DuckDuckGo (fallback).
+- Tuning: `WEB_SEARCH_MAX_RESULTS`, `WEB_SEARCH_MAX_PAGES`, `WEB_SEARCH_MAX_PAGE_CHARS`, `WEB_SEARCH_MAX_ROUNDS`.
+- Client-defined tools always win: if your request already defines `web_search`, yours is used and the gateway never intercepts. Mixed turns (your tools + search) are relayed untouched for you to drive.
+
 **Example (non-streaming):**
 ```bash
 curl http://localhost:8082/v1/chat/completions \

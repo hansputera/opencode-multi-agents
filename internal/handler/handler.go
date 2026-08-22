@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,40 +23,53 @@ import (
 
 // Handler handles HTTP requests for the OpenAI-compatible API
 type Handler struct {
-	cfg       *config.Config
-	pool      *proxy.PoolManager
-	client    upstream.Upstream
-	metrics   *metrics.Store
+	cfg        *config.Config
+	pool       *proxy.PoolManager
+	client     upstream.Upstream
+	metrics    *metrics.Store
 	prometheus *metrics.PrometheusExporter
-	pricing   *metrics.PricingTable
-	log       *zerolog.Logger
-	mux       *http.ServeMux
+	pricing    *metrics.PricingTable
+	log        *zerolog.Logger
+	mux        *http.ServeMux
+
+	// wsDriver is the resolved upstream driver ("zen", "opencode", ...).
+	// The built-in web_search tool only works on pass-through drivers.
+	wsDriver string
+
+	// socksClients caches one HTTP client per proxy ID for web search /
+	// page fetching, so those requests egress through the same VPN tunnel.
+	wsMu        sync.Mutex
+	wsClients   map[string]*http.Client
 }
 
 // New creates a new HTTP handler
 func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Store, log *zerolog.Logger) http.Handler {
 	var client upstream.Upstream
-	switch cfg.UpstreamProvider {
+	driver := cfg.UpstreamProvider
+	switch driver {
 	case "opencode":
 		client = upstream.NewOpenCodeClient(cfg, log)
 	case "opencode-cli":
 		client = upstream.NewOpenCodeCLIClient(cfg, log)
 	default:
 		client = upstream.NewClient(cfg, log)
+		driver = "zen"
 	}
 
 	prometheus := metrics.NewPrometheusExporter(metricsStore)
 	pricing := metrics.NewPricingTable(cfg.ModelPricing)
 
 	h := &Handler{
-		cfg:       cfg,
-		pool:      pool,
-		client:    client,
-		metrics:   metricsStore,
+		cfg:        cfg,
+		pool:       pool,
+		client:     client,
+		metrics:    metricsStore,
 		prometheus: prometheus,
-		pricing:   pricing,
-		log:       log,
-		mux:       http.NewServeMux(),
+		pricing:    pricing,
+		log:        log,
+		mux:        http.NewServeMux(),
+		wsDriver:   driver,
+		wsClients:  make(map[string]*http.Client),
 	}
 
 	// Register routes
@@ -574,6 +588,12 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 	includeUsage := req.Stream && req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 
+	// Inject the gateway's web_search tool on pass-through drivers. The
+	// tool-round helpers decide per-request whether interception is active.
+	if h.cfg.WebSearchEnabled && h.wsDriver == "zen" {
+		body, _ = injectWebSearchTool(body)
+	}
+
 	// metrics records the outcome of the request
 	record := func(success bool, status int, usage upstream.Usage) {
 		if h.metrics == nil {
@@ -693,9 +713,13 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// Stream or return response. Non-2xx upstream responses (e.g. auth
 		// errors) are relayed as-is with their real status even when the
 		// client requested streaming, so errors stay visible to the caller.
+		// On 2xx responses the tool-round helpers run the web_search loop
+		// (injected calls intercepted, executed through the proxy, replayed).
 		var usage upstream.Usage
 		if req.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			usage = h.handleStreamResponse(w, resp, req.Model, includeUsage)
+			usage = h.streamWithToolRounds(w, ctx, proxy, auth, body, req.Model, includeUsage, resp)
+		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			usage = h.completeWithToolRounds(w, ctx, proxy, auth, body, resp)
 		} else {
 			usage = h.handleNormalResponse(w, resp)
 		}
@@ -734,6 +758,22 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	record(false, http.StatusBadGateway, upstream.Usage{})
 }
 
+// writeSSEErrorEvent emits an OpenAI-style error payload as an SSE data event.
+func (h *Handler) writeSSEErrorEvent(w http.ResponseWriter, message string) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": message,
+			"type":    "server_error",
+			"param":   nil,
+			"code":    "stream_interrupted",
+		},
+	})
+	fmt.Fprintf(w, "data: %s\n\n", payload)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // handleStreamResponse handles streaming (SSE) responses. It relays upstream
 // chunks verbatim (including reasoning_content deltas) and adds OpenAI
 // streaming compliance:
@@ -742,7 +782,12 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 //     stream_options.include_usage but the upstream never sent one
 //   - an SSE error event if the upstream connection breaks mid-stream,
 //     instead of ending silently with no [DONE]
-func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Response, model string, includeUsage bool) upstream.Usage {
+//
+// When interceptTools is true (web_search injected), chunks carrying tool
+// calls are buffered instead of relayed. If the stream finishes with only the
+// gateway's web_search calls, they are returned in streamResult.toolCalls for
+// execution; any other shape is flushed to the client verbatim.
+func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Response, model string, includeUsage bool, interceptTools bool) streamResult {
 	defer resp.Body.Close()
 
 	// Set SSE headers
@@ -755,24 +800,23 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.writeError(w, http.StatusInternalServerError, "Streaming not supported")
-		return upstream.Usage{}
+		return streamResult{}
 	}
 
 	var usage upstream.Usage
 	sawUsageChunk := false
 	interrupted := false
 
-	writeSSEError := func(message string) {
-		payload, _ := json.Marshal(map[string]interface{}{
-			"error": map[string]interface{}{
-				"message": message,
-				"type":    "server_error",
-				"param":   nil,
-				"code":    "stream_interrupted",
-			},
-		})
-		fmt.Fprintf(w, "data: %s\n\n", payload)
-		flusher.Flush()
+	var buffered []string                       // withheld lines while a tool-call turn is in flight
+	accs := map[int]*toolCallAccum{}            // assembled calls by index
+	callOrder := []int{}
+	finishToolCalls := false
+
+	flushBuffered := func() {
+		for _, l := range buffered {
+			fmt.Fprint(w, l)
+		}
+		buffered = nil
 	}
 
 	reader := bufio.NewReader(resp.Body)
@@ -782,21 +826,25 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 			if err != io.EOF {
 				h.log.Warn().Err(err).Msg("Stream read error")
 				interrupted = true
-			} else if line != "" {
-				// Final unterminated line; fall through to write it below.
 			}
 			if line == "" {
 				break
 			}
+			// Final unterminated line falls through to processing below.
 		}
 
-		// Parse SSE data lines for usage
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
 			if data == "[DONE]" {
-				// Synthesize the OpenAI-standard terminal usage chunk when the
-				// client opted in via stream_options.include_usage but the
-				// upstream never sent one.
+				// Resolve any buffered tool-call turn before terminating.
+				calls := assembleToolCalls(accs, callOrder)
+				intercepted := interceptTools && finishToolCalls && allWebSearch(calls)
+				if intercepted {
+					buffered = nil // consume silently; gateway executes the calls
+					return streamResult{usage: usage, toolCalls: calls}
+				}
+				flushBuffered()
+
 				if includeUsage && !sawUsageChunk && usage.TotalTokens > 0 {
 					chunk := map[string]interface{}{
 						"id":      "chatcmpl-" + uuid.NewString(),
@@ -810,36 +858,94 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 						fmt.Fprintf(w, "data: %s\n\n", b)
 					}
 				}
-				if _, err := fmt.Fprint(w, line); err != nil {
-					h.log.Warn().Err(err).Msg("Stream write error")
+				if _, werr := fmt.Fprint(w, line); werr != nil {
+					h.log.Warn().Err(werr).Msg("Stream write error")
 					break
 				}
 				flusher.Flush()
 				continue
 			}
+
 			var chunk struct {
 				Usage *upstream.Usage `json:"usage,omitempty"`
+				Choices []struct {
+					Delta struct {
+						ToolCalls []struct {
+							Index    int    `json:"index"`
+							ID       string `json:"id"`
+							Type     string `json:"type"`
+							Function struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							} `json:"function"`
+						} `json:"tool_calls,omitempty"`
+					} `json:"delta"`
+					FinishReason any `json:"finish_reason"`
+				} `json:"choices"`
 			}
-			if err := json.Unmarshal([]byte(data), &chunk); err == nil && chunk.Usage != nil && chunk.Usage.TotalTokens > 0 {
-				usage = *chunk.Usage
-				sawUsageChunk = true
+			hasToolDelta := false
+			isFinishToolCalls := false
+			if jerr := json.Unmarshal([]byte(data), &chunk); jerr == nil {
+				if chunk.Usage != nil && chunk.Usage.TotalTokens > 0 {
+					usage = *chunk.Usage
+					sawUsageChunk = true
+				}
+				for _, ch := range chunk.Choices {
+					if len(ch.Delta.ToolCalls) > 0 {
+						hasToolDelta = true
+						for _, tc := range ch.Delta.ToolCalls {
+							a := accs[tc.Index]
+							if a == nil {
+								a = &toolCallAccum{}
+								accs[tc.Index] = a
+								callOrder = append(callOrder, tc.Index)
+							}
+							if tc.ID != "" {
+								a.id = tc.ID
+							}
+							if tc.Type != "" {
+								a.typ = tc.Type
+							}
+							if tc.Function.Name != "" {
+								a.name = tc.Function.Name
+							}
+							a.args.WriteString(tc.Function.Arguments)
+						}
+					}
+					if s, ok := ch.FinishReason.(string); ok && s == "tool_calls" {
+						isFinishToolCalls = true
+					}
+				}
 			}
+
+			if interceptTools && (hasToolDelta || isFinishToolCalls) {
+				if isFinishToolCalls {
+					finishToolCalls = true
+				}
+				buffered = append(buffered, line)
+				continue // withhold until we know whose calls these are
+			}
+			// Not a tool-call chunk: release anything withheld first so the
+			// client sees a faithful transcript of mixed turns.
+			flushBuffered()
 		}
 
-		// Write SSE line
-		if _, err := fmt.Fprint(w, line); err != nil {
-			h.log.Warn().Err(err).Msg("Stream write error")
-			return usage
+		if _, werr := fmt.Fprint(w, line); werr != nil {
+			h.log.Warn().Err(werr).Msg("Stream write error")
+			return streamResult{usage: usage}
 		}
 		flusher.Flush()
 	}
 
-	// Upstream broke before [DONE]: tell the client in-band so SDKs don't
-	// hang or silently treat a truncated answer as complete.
-	if interrupted {
-		writeSSEError("The upstream connection was interrupted before the response completed.")
+	if len(buffered) > 0 {
+		// Stream ended without [DONE]; don't lose what we withheld.
+		flushBuffered()
 	}
-	return usage
+
+	if interrupted {
+		h.writeSSEErrorEvent(w, "The upstream connection was interrupted before the response completed.")
+	}
+	return streamResult{usage: usage}
 }
 
 // handleNormalResponse handles non-streaming responses
