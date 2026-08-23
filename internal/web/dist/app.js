@@ -14,7 +14,10 @@ const App = {
       history.replaceState(null, '', hash);
     }
     const name = hash.replace(/^#\/?/, '').split('?')[0] || 'dashboard';
-    const views = { chat: ChatView, getkey: GetKeyView };
+    // Lazy view lookup: tolerate load-order differences between view files.
+    const views = {};
+    if (typeof ChatView !== 'undefined') views.chat = ChatView;
+    if (typeof GetKeyView !== 'undefined') views.getkey = GetKeyView;
     const view = views[name] || DashboardView;
 
     if (this.current && this.current.destroy) {
