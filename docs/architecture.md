@@ -32,25 +32,32 @@ Technical deep dive: components, request lifecycle, container lifecycle, data mo
 | Package | Responsibility |
 |---|---|
 | `cmd/gateway` | Entry point: config load, logger, store init, pool start, HTTP server, graceful shutdown |
+| `cmd/powsolver` | Native multi-core BLAKE3 CLI client for the PoW key gate |
 | `internal/config` | Env + YAML config, defaults, validation |
-| `internal/handler` | HTTP routing: `/v1/*`, `/api/metrics`, `/metrics`, `/health`, `/stats`, embedded UI |
+| `internal/handler` | HTTP routing (`/v1/*`, `/api/pow/*`, `/api/metrics`, ...), auth middleware (env ∪ issued keys + per-key limits), web-search tool rounds |
 | `internal/upstream` | Provider drivers (`zen`, `opencode`, `opencode-cli`), SOCKS5 HTTP transport, retry logic |
-| `internal/proxy` | Pool manager (state machine, bans, used-server tracking), Docker manager (container lifecycle), Manager interface |
+| `internal/proxy` | Pool manager (state machine, region/IP bans, round-robin dispatch, duplicate-IP rotation), Docker manager (container lifecycle) |
 | `internal/protonvpn` | SRP auth, certificate issuance, server selection, SQLite persistence |
-| `internal/metrics` | SQLite metrics store, token extraction support, pricing table, Prometheus exporter |
-| `internal/web` | Embedded dashboard/chat UI (`go:embed`) |
+| `internal/pow` | Hashcash-style challenge/verify domain, adaptive difficulty controller, key/challenge SQLite store (`data/pow.db`) |
+| `internal/websearch` | Built-in web_search tool: providers (DuckDuckGo/SearXNG/Brave), page fetcher, result formatting |
+| `internal/metrics` | SQLite metrics store (chat completions + endpoint traffic), token pricing, Prometheus exporter, system-info collector |
+| `internal/web` | Embedded UI (`go:embed`): dashboard, chat, PoW solver view |
 
 ## Request Lifecycle (zen driver)
 
-1. **Receive & validate** — `POST /v1/chat/completions` arrives; request ID assigned; body capped at 10MB.
-2. **Proxy acquisition** — pool manager picks a proxy:
+1. **Gateway auth** (middleware): bearer token resolved against env keys (`GATEWAY_API_KEYS`) and PoW-issued keys (in-memory cache, SQLite fallback). Issued keys additionally pass burst-cooldown and plan-RPM checks. Gateway-local credentials are then **stripped** — upstream auth is chosen separately by `resolveAuth` (client provider keys pass through; otherwise configured key / random `UPSTREAM_API_KEYS` pick / public tier).
+2. **Receive & validate** — `POST /v1/chat/completions` arrives; request ID assigned; body capped at 10MB; OpenAI-standard validation (`model`, messages shape).
+3. **Tool injection** — when the web_search tool is enabled, the function definition is added to the request's tools array (client-defined tools win).
+4. **Proxy acquisition** — pool manager picks a proxy via round-robin:
    - Sticky session hit? Use that proxy if healthy.
    - Otherwise: least-recently-used **Idle** proxy.
    - All busy/banned? Wait for a free one or for a replacement container to boot (bounded by `RATE_LIMIT_FRESH_IP_WAIT` when everything is banned).
-3. **Forward** — the upstream client dials the provider through `socks5://127.0.0.1:<port>` with exponential-backoff retries (`MAX_RETRIES`, `RETRY_BASE_DELAY`→`RETRY_MAX_DELAY`).
-4. **Rate-limit check** — on 429 or keyword match: ban IP/region, move proxy to cooldown, spawn replacement, transparently retry through a fresh IP (see business-logic.md).
-5. **Token accounting** — usage is extracted from the response (streaming: from final SSE chunk / non-streaming: from JSON body); cost estimated via pricing table.
-6. **Persist & release** — metrics row written to SQLite + Prometheus counters bumped; proxy released back to Idle.
+5. **Forward** — the upstream client dials the provider through `socks5://127.0.0.1:<port>` with exponential-backoff retries (`MAX_RETRIES`, `RETRY_BASE_DELAY`→`RETRY_MAX_DELAY`).
+6. **Rate-limit check** — on 429 or keyword match: ban IP/region, move proxy to cooldown, spawn replacement, transparently retry through a fresh IP (see business-logic.md).
+7. **Web-search rounds** — if the model called only the gateway's injected `web_search` tool, the gateway executes it through the same proxy's SOCKS5 tunnel, replays assistant+tool messages, and requests another round (up to `WEB_SEARCH_MAX_ROUNDS`). Streaming clients see one seamless stream; intercepted chunks never surface.
+8. **Token accounting** — usage extracted from the response (aggregated across search rounds); cost estimated via pricing table.
+9. **Traffic accounting** — the outer logging middleware records every request to `endpoint_traffic` (route template, status, latency, bytes out) regardless of outcome.
+10. **Persist & release** — metrics rows written to SQLite + Prometheus counters bumped; proxy released back to Idle.
 
 ## Container Lifecycle
 
@@ -83,6 +90,25 @@ schema_version(version)
 - Versioned migrations (v1 schema, v2 token/cost columns).
 - Snapshot API aggregates: summary totals, per-minute traffic series (zero-filled buckets), per-model usage.
 
+### SQLite: pow.db (`internal/pow`)
+
+```
+pow_challenges(id, bind, plan, algo, difficulty, salt,
+               issued_at, expires_at, used)
+api_keys(key_hash, prefix, plan, rpm, created_at, expires_at, disabled)
+pow_ip_bonus(ip_hash, bonus_bits, updated_at)   -- farming penalty
+```
+
+Challenges are single-use (atomic `used=0→1` consume), TTL'd, and pruned periodically. Keys are stored **hashed only**; the plaintext is shown once at issuance.
+
+### SQLite: metrics.db — endpoint traffic (`internal/metrics`, migration v3)
+
+```
+endpoint_traffic(id, ts, method, route, status, duration_ms, bytes_out)
+```
+
+One row per server request (all routes; infra self-polling like `/metrics` and `/health` excluded). Aggregated into per-minute traffic series and top-endpoint tables for `/api/metrics`; pruned after 7 days.
+
 ### SQLite: protonvpn.db (`internal/protonvpn`)
 
 ```
@@ -101,6 +127,8 @@ ed25519_keys   — certificate key pair
 - **Certificate issuance**: process-wide mutex — concurrent requests to ProtonVPN's cert API trigger key conflicts (409/code 2500).
 - **Region/server bans**: maps under the pool lock; expired entries are lazily cleaned during lookups and periodic pruning.
 - **HTTP clients**: cached per-proxy transports (connection reuse); global limits via `MAX_CONCURRENT`.
+- **PoW service**: one mutex guards key cache + rate-limit maps; verification itself is stateless (single hash). Issued-key auth lookups are cache-first with a SQLite fallback.
+- **Web-search rounds**: executed inline within the request goroutine; tool-call chunk buffering is per-request.
 
 ## Key Interfaces
 

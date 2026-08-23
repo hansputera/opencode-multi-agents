@@ -84,8 +84,15 @@ If a certificate key conflicts (409/2500), the gateway regenerates the Ed25519 k
 | `UPSTREAM_API_KEYS` | Comma-separated key list; a **random** key is picked per request (when the client sends no `Authorization`) to spread quota/rate limits across accounts. Entries: `public`, `zent-...`, or `header:value` | - |
 | `GATEWAY_API_KEYS` | Comma-separated gateway keys. When set, `/v1/*` requires `Authorization: Bearer <key>` (401 otherwise); empty keeps the API open | - |
 | `POW_ENABLED` | Gate `/v1/*` behind PoW-issued keys (env keys still work) | `false` (`true` in compose) |
+| `POW_STORE_PATH` | SQLite location for challenges/keys | `data/pow.db` |
+| `POW_CHALLENGE_TTL` | Challenge lifetime | `10m` |
 | `POW_KEY_TTL` | Lifetime of issued API keys | `168h` (7 days) |
+| `POW_BASE_DIFFICULTY` / `_MIN` / `_MAX` | Adaptive difficulty base + clamps (leading zero bits) | `24` / `20` / `40` |
+| `POW_PLAN{1,2,3}_DIFFICULTY` | Extra bits per plan (basic/plus/pro) | `0` / `4` / `8` |
+| `POW_PLAN{1,2,3}_RPM` | Rate limit per plan | `100` / `250` / `500` |
 | `POW_BURST_RPS` / `POW_BURST_COOLDOWN` | Burst abuse guard: requests/sec that trips a key cooldown | `5` / `5m` |
+| `POW_CHALLENGE_RATE_PER_MIN` / `_PER_DAY` | Per-IP challenge issuance quota | `6` / `60` |
+| `POW_ADJUST_INTERVAL` | Difficulty housekeeping interval | `30s` |
 | `UPSTREAM_PROVIDER` | Upstream driver: `zen` (default, raw OpenAI-compatible), `opencode` (drive an [OpenCode Server](https://opencode.ai/docs/server) via HTTP) or `opencode-cli` (docker-exec `opencode run` inside each VPN container). In all cases each request egresses through a unique per-container VPN IP | `zen` |
 | `OPENCODE_SERVER_URL` | Base URL of `opencode serve` (used when `UPSTREAM_PROVIDER=opencode`). Must be reachable through the proxy container's SOCKS5 tunnel | `http://127.0.0.1:4096` |
 | `OPENCODE_SERVER_PASSWORD` | Optional `OPENCODE_SERVER_PASSWORD` for OpenCode Server basic auth (`opencode`-mode) | - |
@@ -144,7 +151,8 @@ log_format: "console"
 
 Open `http://localhost:8082` in your browser:
 
-- **Dashboard** (`#/dashboard`): live metrics — total requests, success rate, avg latency, **total tokens** (prompt in / completion out), **estimated cost** (with cached-token count), streaming requests, errors, uptime, per-minute traffic chart, per-model usage with per-model token counts and cost, and proxy pool status showing each container's state and egress IP (duplicate IPs flagged). Auto-refreshes every 5 seconds.
+- **Dashboard** (`#/dashboard`): live metrics — total requests, success rate, avg latency, **total tokens** (prompt in / completion out), **estimated cost**, **all server requests**, **data served**, streaming, errors, uptime; per-minute traffic chart covering ALL endpoints; **Traffic by endpoint** panel (per-route requests, error %, avg latency); **Server specifications** panel (CPU model/cores, memory, disk, load averages, uptimes, goroutines); model usage with per-model token counts and cost; proxy pool status with each container's state and egress IP. Auto-refreshes every 5 seconds.
+- **Get Key** (`#/getkey`): earn a free API key by solving a PoW challenge (see below) — plan picker, live hashrate/progress/ETA, cancel anytime, pauses when the tab is hidden.
 - **Chat** (`#/chat`): a ChatGPT-like interface with model selection, SSE streaming responses, and per-conversation sticky sessions (`conversation_id` handled automatically).
 
 > Token metrics require `MODEL_PRICING` to be set for cost estimation; token counts are always recorded. Unknown models estimate at $0.
@@ -265,7 +273,7 @@ Returns statistics about the proxy pool.
 curl http://localhost:8082/api/metrics
 ```
 
-Returns the dashboard payload: aggregated totals (requests, errors, success rate, avg latency, uptime, total/prompt/completion/cached tokens, estimated cost), per-minute traffic series, per-model usage with token counts and cost, pool statistics, and per-proxy details. Persisted in SQLite (see `METRICS_DB_PATH`), pruned after 7 days.
+Returns the dashboard payload: aggregated chat totals (requests, errors, success rate, avg latency, tokens, estimated cost), per-minute traffic series for **all server endpoints**, per-model usage with token counts and cost, **server-wide endpoint stats** (totals + top routes over 24h with bytes served), **host/process specifications** (CPU, memory, load, disk, uptimes), pool statistics, and per-proxy details. Persisted in SQLite (`METRICS_DB_PATH` + `POW_STORE_PATH` data), pruned after 7 days.
 
 ```bash
 curl http://localhost:8082/metrics

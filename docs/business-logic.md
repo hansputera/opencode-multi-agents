@@ -73,6 +73,24 @@ Region rotation cannot dodge **account/key-based** limits (throttle follows the 
 
 This makes the dashboard a usage ledger: totals, per-model breakdowns, and per-minute traffic — enough to answer "which model burns my free tier fastest?" without being a billing system.
 
+## Rule 8 — PoW Key Gating & Plan Economics
+
+When `POW_ENABLED=true`, `/v1/*` admits only env keys or keys **earned** by solving a proof-of-work challenge (full protocol: [pow-api-keys.md](pow-api-keys.md)). The business rules:
+
+- **Effort scales with appetite**: `basic` (+0 bits) buys 100 req/min for ~1 minute of compute; `plus` (+4 bits) buys 250 req/min for ~16× the work; `pro` (+8 bits) buys 500 req/min for ~256×. Rate limits grow linearly while cost grows exponentially — that asymmetry is the whole model.
+- **Difficulty follows reality**: an EWMA of server-measured solve times moves the global base up/down to hold a 30–90 s solve window; per-IP bonuses (+1 bit per earned key, capped, decaying after 24 h) make farming progressively more expensive.
+- **Single-use + binding + TTL**: challenges cannot be shared, stockpiled, or solved in advance.
+- **Too-fast solutions are rejected**: a real solve cannot finish in <500 ms — anything faster is treated as an attack signal.
+
+## Rule 9 — Burst Cooldown
+
+Rate limits alone don't punish abuse — they just slow it. So issued keys have a punitive tripwire:
+
+- More than `POW_BURST_RPS` (5) requests in any rolling **1-second window** freezes the key for `POW_BURST_COOLDOWN` (5 minutes).
+- During cooldown every request returns `429 key_cooldown` with `Retry-After` — even polite ones. This is deliberate: the cooldown must be worse than the burst was profitable.
+- Cooldown checks run **before** RPM buckets so abusers immediately see the punitive state.
+- In-memory only: a gateway restart forgives cooldowns (restarts are rare; hot-path SQLite writes would be wasted).
+
 ## Health & Lifecycle Rules
 
 - Health probe: fetch egress IP through each SOCKS5 port every `HEALTH_CHECK_PERIOD`. Verifies the full path (tunnel + proxy), not just process liveness.
@@ -89,6 +107,9 @@ This makes the dashboard a usage ledger: totals, per-model breakdowns, and per-m
 | `--privileged` containers | Minimal caps | `wg-quick` needs sysctl/iptables control; can be tightened later |
 | SQLite metrics | Prometheus-only | Dashboard needs history without external infra |
 | Keyword-based 429 detection | Status-code only | Providers wrap 429s inconsistently |
+| PoW instead of signup for free keys | Email/invite gating | Zero PII, zero ops; cost lands on the abuser's electricity bill |
+| Punitive burst cooldown vs plain rate limit | Higher bucket only | Limits throttle revenue-free traffic; cooldowns make bursts unprofitable |
+| Round-robin dispatch over random map order | Random selection | Even container wear and predictable per-proxy load |
 
 ---
 

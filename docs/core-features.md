@@ -112,25 +112,83 @@ Rates are USD per 1M tokens. Cached defaults to input x 0.5 if omitted; unknown 
 - Model usage panel: per-model prompt/completion/total tokens + cost
 - `/api/metrics` JSON and Prometheus counters at `/metrics`
 
-## 8. Web Dashboard & Chat UI
+## 8. PoW-Gated Free API Keys
+
+**What**: With `POW_ENABLED=true`, `/v1/*` requires an API key — either from `GATEWAY_API_KEYS` or a free key **earned by solving a proof-of-work puzzle** (Hashcash-style; no blockchain, no signup).
+
+**Why**: The service is free but not free-to-abuse. PoW makes every key cost real compute: casual users pay one minute, abusers paying for thousands of keys pay thousands of minutes.
+
+**Plans** (harder puzzle → higher limit):
+
+| Plan | Extra bits | Rate limit |
+|---|---|---|
+| `basic` | +0 | 100 req/min |
+| `plus` | +4 (~16×) | 250 req/min |
+| `pro` | +8 (~256×) | 500 req/min |
+
+**Runtime behavior**: challenges are single-use, expire in 10 minutes, and are bound to the requester's IP+fingerprint. Difficulty adapts automatically to keep honest solves in the 30–90 s window. Keys last 7 days and are stored hashed. Bursting >5 req/s cools a key down for 5 minutes.
+
+Full protocol and solver details: [pow-api-keys.md](pow-api-keys.md).
+
+## 9. Built-in Web Search
+
+**What**: the gateway injects a `web_search(query)` function into chat requests (zen driver). When the model calls it, the gateway searches the web server-side — through the same rotating VPN IP as model traffic — extracts readable text from top pages, and feeds results back for another round.
+
+**Why**: models without live data can answer current-events questions anyway; clients just see a normal streaming response.
+
+**Runtime behavior**:
+- Works identically for streaming and non-streaming requests; intercepted tool-call chunks never reach the client
+- Providers: SearXNG (`SEARXNG_URL`), Brave (`BRAVE_API_KEY`), or keyless DuckDuckGo fallback
+- Client-defined tools always win: your own `web_search` suppresses injection; mixed turns are relayed untouched
+- Mid-loop VPN tunnel failures retry on fresh proxies automatically
+
+
+## 10. OpenAI-Standard API Compliance
+
+**What**: the API surface follows OpenAI's published behavior precisely, so stock SDKs work unchanged.
+
+- **Error envelope**: `{"error": {"message", "type", "param", "code"}}` with correct types (`invalid_request_error`, `authentication_error`, `rate_limit_error`, ...) and `param` naming the offending field (e.g. `"messages[0].role"`)
+- **Validation**: required `model`, role/content checks per message, JSON content-type enforcement (415)
+- **Routing**: unknown `/v1/*` paths → JSON 404 (`unknown_url`); wrong methods → JSON 405 with `Allow`; `GET /v1/models/{id}` retrieves one model or 404 `model_not_found`
+- **Streaming**: relays `reasoning_content` deltas, honors `stream_options.include_usage` (synthesizes a terminal usage chunk when possible), emits an in-band SSE error event if the upstream breaks mid-stream
+
+## 11. Server Usage Metrics & System Specs
+
+**What**: every request to any endpoint is recorded — route, status, latency, bytes served — and aggregated server-wide.
+
+**Why**: "how is my free service being used" needs the whole picture, not just chat completions.
+
+**Where you see it**:
+- Dashboard stat cards: **All Server Requests**, **Data Served** (bytes)
+- **Traffic by endpoint** panel: top routes over 24h with request bars, error %, avg latency
+- **Server specifications** panel: CPU model/cores, OS/arch + Go version, host memory used/total, load averages, host/process uptime, process RSS + goroutines, disk free on the data volume
+- The per-minute traffic chart shows ALL requests; infrastructure self-polling (healthchecks, Prometheus scrapes, dashboard refresh) is excluded
+- Prometheus: `opencode_endpoint_requests_total{route,status}`, `opencode_bytes_served_total{route}`
+
+
+## 12. Web Dashboard & Chat UI
 
 **Dashboard** (`#/dashboard`): neobrutalism-styled, auto-refreshes every 5s:
 
-- Stat cards: requests, success rate, latency, tokens, cost, streaming, errors, uptime
-- Per-minute traffic chart (requests + errors, zero-filled buckets)
+- Stat cards: requests, success rate, latency, tokens, cost, all server requests, data served, streaming, errors, uptime
+- Per-minute traffic chart covering ALL server requests (zero-filled buckets)
 - Model usage panel with token/cost rows per model
+- **Traffic by endpoint** panel: per-route request bars with error % and avg latency (last 24h)
+- **Server specifications** panel: CPU model/cores, memory, disk, load averages, uptimes, goroutines
 - Proxy pool panel: state badges, SOCKS5 address, egress IP, duplicate-IP flags, per-proxy request/error counts
+
+**Get Key** (`#/getkey`): plan picker → heat/power warning → live PoW solver (see section 8) → issued key stored in localStorage and used automatically by Chat.
 
 **Chat** (`#/chat`): ChatGPT-like interface — model picker, SSE streaming with reasoning display, multi-conversation sidebar backed by localStorage, automatic `conversation_id` sticky-session wiring.
 
-## 9. Observability
+## 13. Observability
 
 - **Structured logging**: zerolog, JSON or console, level-configurable, request IDs on every HTTP response.
 - **Prometheus**: `/metrics` exposes request counters by model/status, token counters, latency histograms, pool gauges.
 - **Health endpoints**: `/health` (gateway + pool summary), `/stats` (pool statistics).
 - **Metrics persistence**: SQLite (`METRICS_DB_PATH`), WAL mode, rows pruned after 7 days.
 
-## 10. Multiple Upstream Drivers
+## 14. Multiple Upstream Drivers
 
 `UPSTREAM_PROVIDER` selects how requests reach the AI:
 
@@ -142,8 +200,9 @@ Rates are USD per 1M tokens. Cached defaults to input x 0.5 if omitted; unknown 
 
 In all modes every request egresses through a per-container VPN IP with automatic rotation on rate limits.
 
-## 11. Security Posture
+## 15. Security Posture
 
+- Optional PoW key gate on `/v1/*`; issued keys stored hashed, 7-day expiry, burst-cooldown abuse guard.
 - Containers run non-root in production images; pinned Alpine base; Docker HEALTHCHECK.
 - Client-facing errors are sanitized; request bodies capped at 10MB; configurable CORS.
 - ProtonVPN credentials live only in `.env`/SQLite on your host; they are never logged or returned by any API.

@@ -19,8 +19,13 @@ A lightweight, performant API gateway built in Go that provides OpenAI-compatibl
 - ✅ Thread-safe proxy pool management
 - ✅ Graceful shutdown
 - ✅ Token usage tracking with per-model cost estimation (`MODEL_PRICING`)
-- ✅ Web dashboard (neobrutalism UI) + Chat UI, SQLite-backed metrics
-- ✅ Prometheus `/metrics` endpoint
+- ✅ PoW-gated free API keys: Hashcash-style challenges, 3 plans (basic/plus/pro → 100/250/500 req/min), 7-day keys, burst cooldown
+- ✅ Built-in `web_search` tool with multi-round function calling (server-side, VPN egress)
+- ✅ OpenAI-standard compliance: typed error envelope, request validation with `param`, JSON 404/405, `GET /v1/models/{id}`, streaming hardening
+- ✅ Server-wide usage metrics: per-endpoint traffic breakdown, bytes served, system specs panel
+- ✅ Round-robin load balancing + duplicate egress-IP auto-rotation
+- ✅ Web dashboard (neobrutalism UI) + Chat UI + PoW solver view, SQLite-backed metrics
+- ✅ Prometheus `/metrics` endpoint (chat + endpoint traffic counters)
 
 #### Technical Stack
 - **Language**: Go 1.26
@@ -50,10 +55,8 @@ opencode-multi-agents/
 │   │   ├── pricing.go
 │   │   └── prometheus.go
 │   ├── protonvpn/           # ProtonVPN native client: SRP auth, certs, server list
-│   │   ├── auth.go          # SRP login flow + session/cookie management
-│   │   ├── client.go        # Server selection, certificate issuance, key derivation
-│   │   ├── store.go         # SQLite store (credentials/sessions/certs/cache)
-│   │   └── types.go         # API types
+│   ├── pow/                 # PoW gate: challenge/verify, difficulty controller, key store
+│   ├── websearch/           # Built-in web_search: providers, fetcher, formatting
 │   ├── proxy/               # Proxy pool management
 │   │   ├── docker.go        # Docker container manager (WireGuard + gost)
 │   │   ├── pool.go          # Pool manager with state machine
@@ -62,6 +65,7 @@ opencode-multi-agents/
 │   │   └── types_test.go
 │   ├── upstream/            # Upstream provider clients (zen/opencode/opencode-cli)
 │   └── web/                 # Embedded web UI (dashboard + chat)
+├── cmd/powsolver/           # Native multi-core PoW solver CLI
 ├── bin/                     # Compiled binary (~20MB)
 ├── docker-compose.yml       # Gateway service (host networking)
 ├── Dockerfile              # Gateway container image
@@ -119,6 +123,7 @@ opencode-multi-agents/
 - Log level and format
 - Model pricing for cost estimation
 - Model list filter
+- PoW gate: enabled flag, TTLs, difficulty clamps, plan tiers, burst guard, issuance quotas
 
 #### Testing
 - ✅ Unit tests for config and proxy modules
@@ -224,9 +229,12 @@ To complete the project:
 3. **Zero-Downtime Rotation**: New proxies created while old ones cool down
 4. **Server & Region Rotation**: Containers spread across different ProtonVPN servers; banned regions/servers avoided automatically
 5. **Native ProtonVPN Auth**: SRP login + certificate issuance with derived WireGuard keys — fully automated
-6. **Token Metrics**: Per-model token usage and cost estimation on the dashboard and via Prometheus
-7. **Resource Efficient**: Each VPN container limited to 0.25 CPU and 512MB RAM
-8. **Comprehensive Observability**: Health, stats, Prometheus `/metrics`, and structured logging
+6. **PoW-Gated Free Keys**: Hashcash-style issuance with three effort tiers and punitive burst cooldown
+7. **Built-in Web Search**: server-side multi-round function calling over the rotating VPN IPs
+8. **Server Metrics & Specs**: per-endpoint traffic, bytes served, live host/process specifications
+9. **Token Metrics**: Per-model token usage and cost estimation on the dashboard and via Prometheus
+10. **Resource Efficient**: Each VPN container limited to 0.25 CPU and 512MB RAM
+11. **Comprehensive Observability**: Health, stats, Prometheus `/metrics`, and structured logging
 
 ---
 
