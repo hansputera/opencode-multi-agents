@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/hansputera/opencode-multi-agents/internal/config"
-	"github.com/hansputera/opencode-multi-agents/internal/proxy"
 	powpkg "github.com/hansputera/opencode-multi-agents/internal/pow"
+	"github.com/hansputera/opencode-multi-agents/internal/proxy"
 	"github.com/rs/zerolog"
 )
 

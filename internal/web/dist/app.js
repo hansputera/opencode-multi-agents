@@ -80,6 +80,20 @@ function fmtNum(n) {
   return new Intl.NumberFormat('en-US').format(n || 0);
 }
 
+function fmtBytes(n) {
+  n = Number(n || 0);
+  if (n >= 1099511627776) return (n / 1099511627776).toFixed(2) + ' TB';
+  if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+function shortGo(v) {
+  // go1.26.4 -> 1.26.4
+  return String(v || '').replace(/^go/, '');
+}
+
 function fmtCompact(n) {
   n = n || 0;
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';

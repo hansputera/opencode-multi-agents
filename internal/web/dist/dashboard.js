@@ -66,6 +66,20 @@ const DashboardView = {
             </div>
           </div>
 
+          <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <div class="neo-card p-5 bg-white">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-black">Traffic by endpoint</h3>
+                <span class="badge bg-blue text-white">last 24h</span>
+              </div>
+              <div id="endpoint-usage" class="space-y-2"></div>
+            </div>
+            <div class="neo-card p-5 bg-white">
+              <h3 class="text-lg font-black mb-4">🖥️ Server specifications</h3>
+              <div id="system-info" class="grid grid-cols-2 gap-2 text-sm"></div>
+            </div>
+          </div>
+
           <div class="neo-card p-5 bg-blue">
             <div class="flex items-center justify-between mb-4">
               <h3 class="text-lg font-black text-white">Proxy pool</h3>
@@ -89,6 +103,8 @@ const DashboardView = {
       this.renderStats(data);
       this.renderTraffic(data.metrics);
       this.renderModels(data.metrics);
+      this.renderEndpoints(data.server);
+      this.renderSystem(data.system);
       this.renderPool(data);
       const pill = $('#health-pill');
       pill.className = 'badge ' + (data.pool.total > 0 && (data.pool.idle > 0 || data.pool.active > 0) ? 'bg-green' : 'bg-red');
@@ -108,6 +124,8 @@ const DashboardView = {
       { label: 'Avg Latency', value: s.avg_latency_ms != null ? s.avg_latency_ms.toFixed(0) + 'ms' : '—', color: 'bg-blue', icon: '⏱️' },
       { label: 'Total Tokens', value: fmtCompact(s.total_tokens), color: 'bg-pink', icon: '🔢', extra: fmtCompact(s.total_prompt_tokens) + ' in / ' + fmtCompact(s.total_completion_tokens) + ' out' },
       { label: 'Est. Cost', value: fmtCost(s.total_estimated_cost), color: 'bg-purple', icon: '💸', extra: s.total_cached_tokens ? fmtCompact(s.total_cached_tokens) + ' cached' : '' },
+      { label: 'All Server Requests', value: fmtNum(data.server ? data.server.total_requests : 0), color: 'bg-teal', icon: '🌐', extra: data.server ? fmtBytes(data.server.bytes_out) + ' served' : '' },
+      { label: 'Data Served', value: fmtBytes(data.server ? data.server.bytes_out : 0), color: 'bg-lime', icon: '📡' },
       { label: 'Streaming Reqs', value: fmtNum(s.stream_requests), color: 'bg-cream', icon: '🌊' },
       { label: 'Errors', value: fmtNum(s.total_errors), color: 'bg-red', icon: '🚨' },
       { label: 'Uptime', value: fmtDuration(s.uptime_seconds), color: 'bg-orange', icon: '⏳' },
@@ -217,6 +235,58 @@ const DashboardView = {
         </div>
       </div>
     `).join('');
+  },
+
+  renderEndpoints(server) {
+    const el = $('#endpoint-usage');
+    if (!el) return;
+    const eps = (server && server.endpoints) || [];
+    if (!eps.length) {
+      el.innerHTML = '<p class="text-sm font-bold opacity-60">no endpoint traffic recorded yet</p>';
+      return;
+    }
+    const max = Math.max(...eps.map((e) => e.requests), 1);
+    el.innerHTML = eps.map((e, i) => {
+      const errPct = e.requests ? (e.errors / e.requests * 100) : 0;
+      const label = `${e.method} ${e.route}`;
+      return `
+        <div class="space-y-1">
+          <div class="flex items-center justify-between gap-2 text-[11px] font-bold">
+            <span class="truncate" title="${esc(label)}">${esc(label)}</span>
+            <span class="flex items-center gap-2 shrink-0">
+              <span class="badge" style="background:${NEO_COLORS[i % NEO_COLORS.length]}">${fmtNum(e.requests)}</span>
+              ${e.errors ? `<span class="badge bg-red text-white">${errPct.toFixed(0)}% err</span>` : ''}
+              <span class="opacity-60">${Math.round(e.avg_latency_ms)}ms</span>
+            </span>
+          </div>
+          <div class="h-3 border-2 border-ink rounded bg-cream overflow-hidden">
+            <div class="h-full" style="width:${Math.max(3, e.requests / max * 100)}%;background:${NEO_COLORS[i % NEO_COLORS.length]}"></div>
+          </div>
+        </div>`;
+    }).join('');
+  },
+
+  renderSystem(sys) {
+    const el = $('#system-info');
+    if (!el || !sys) return;
+    const memUsed = sys.mem_total_mb ? sys.mem_total_mb - sys.mem_avail_mb : 0;
+    const items = [
+      ['🖥️ CPU', sys.cpu_model ? `${sys.cpu_model}` : `${sys.num_cpu} cores`],
+      ['⚙️ Cores', `${sys.num_cpu} · Go ${shortGo(sys.go_version)}`],
+      ['🧠 Memory', sys.mem_total_mb ? `${fmtBytes(memUsed * 1048576)} / ${fmtBytes(sys.mem_total_mb * 1048576)}` : '—'],
+      ['📦 Process RSS', fmtBytes((sys.proc_rss_mb || 0) * 1048576)],
+      ['💾 Disk free', sys.disk_free_gb ? `${sys.disk_free_gb.toFixed(1)} GB / ${sys.disk_total_gb.toFixed(0)} GB` : '—'],
+      ['📈 Load avg', sys.load1 != null ? `${(sys.load1||0).toFixed(2)} · ${(sys.load5||0).toFixed(2)} · ${(sys.load15||0).toFixed(2)}` : '—'],
+      ['⏱️ Host uptime', sys.host_uptime_seconds ? fmtDuration(sys.host_uptime_seconds) : '—'],
+      ['🔀 Goroutines', String(sys.goroutines ?? '—')],
+      ['🐧 Platform', `${sys.os}/${sys.arch}`],
+      ['⏳ Process up', sys.process_uptime_s ? fmtDuration(Math.floor(sys.process_uptime_s)) : '—'],
+    ];
+    el.innerHTML = items.map(([k, v]) => `
+      <div class="border-2 border-ink rounded-lg p-2 bg-cream min-w-0">
+        <div class="text-[10px] font-black opacity-60 uppercase">${k}</div>
+        <div class="text-xs font-bold truncate" title="${esc(String(v))}">${esc(String(v))}</div>
+      </div>`).join('');
   },
 
   renderPool(data) {

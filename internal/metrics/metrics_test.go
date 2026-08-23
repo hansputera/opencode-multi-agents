@@ -28,6 +28,14 @@ func TestRecordAndSnapshot(t *testing.T) {
 		t.Fatalf("failed to record: %v", err)
 	}
 
+	// The traffic series now reflects ALL server requests (endpoint layer);
+	// mirror the middleware behavior for the chat requests above.
+	for i := 0; i < 4; i++ {
+		if err := s.RecordEndpoint("POST", "/v1/chat/completions", 200, 100*time.Millisecond, 1024); err != nil {
+			t.Fatalf("failed to record endpoint: %v", err)
+		}
+	}
+
 	snap, err := s.Snapshot()
 	if err != nil {
 		t.Fatalf("failed to snapshot: %v", err)
@@ -199,5 +207,75 @@ func TestPricingTableParse(t *testing.T) {
 	}
 	if entry.CachedPer1M != 0.50 {
 		t.Errorf("expected cached rate 0.50 (50%% of input), got %f", entry.CachedPer1M)
+	}
+}
+
+// TestEndpointTrafficAndServerAggregation covers the server-usage layer:
+// recording all requests per route and the Snapshot.server aggregates.
+func TestEndpointTrafficAndServerAggregation(t *testing.T) {
+	s := newTestStore(t)
+
+	rec := []struct {
+		method, route string
+		status        int
+		dur           time.Duration
+		bytes         int64
+	}{
+		{"POST", "/v1/chat/completions", 200, 100 * time.Millisecond, 5000},
+		{"POST", "/v1/chat/completions", 200, 300 * time.Millisecond, 7000},
+		{"GET", "/v1/models", 200, 20 * time.Millisecond, 1200},
+		{"GET", "/v1/models", 500, 30 * time.Millisecond, 200},
+		{"POST", "/api/pow/challenge", 200, 10 * time.Millisecond, 400},
+	}
+	for _, r := range rec {
+		if err := s.RecordEndpoint(r.method, r.route, r.status, r.dur, r.bytes); err != nil {
+			t.Fatalf("RecordEndpoint(%s %s): %v", r.method, r.route, err)
+		}
+	}
+
+	snap, err := s.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	sv := snap.Server
+	if sv.TotalRequests != 5 {
+		t.Errorf("server totals.requests = %d, want 5", sv.TotalRequests)
+	}
+	if sv.TotalErrors != 1 {
+		t.Errorf("server totals.errors = %d, want 1 (the 500)", sv.TotalErrors)
+	}
+	if sv.BytesOut != 5000+7000+1200+200+400 {
+		t.Errorf("server bytes = %d", sv.BytesOut)
+	}
+
+	byRoute := map[string]EndpointUsage{}
+	for _, e := range sv.Endpoints {
+		byRoute[e.Method+" "+e.Route] = e
+	}
+	chat := byRoute["POST /v1/chat/completions"]
+	if chat.Requests != 2 || chat.AvgLatencyMS != 200 {
+		t.Errorf("chat endpoint agg = %+v", chat)
+	}
+	models := byRoute["GET /v1/models"]
+	if models.Requests != 2 || models.Errors != 1 {
+		t.Errorf("models endpoint agg = %+v", models)
+	}
+
+	// The traffic series now reflects ALL server traffic.
+	total := 0
+	for _, p := range snap.Traffic {
+		total += p.Requests
+	}
+	if total < 5 {
+		t.Errorf("traffic series should include all endpoints; got %d of 5", total)
+	}
+}
+
+func TestUntrackedPaths(t *testing.T) {
+	for _, p := range []string{"/metrics", "/health", "/api/metrics"} {
+		if !UntrackedPaths[p] {
+			t.Errorf("%s should be untracked", p)
+		}
 	}
 }

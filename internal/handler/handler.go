@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -192,8 +193,6 @@ func (h *Handler) gatewayAuthMiddleware(next http.Handler) http.Handler {
 
 		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		id, ok := h.lookupKey(bearer)
-		if strings.HasPrefix(r.URL.Path, "/v1/models") {
-		}
 
 		switch {
 		case ok && id.Env:
@@ -224,12 +223,13 @@ func (h *Handler) gatewayAuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// loggingMiddleware logs all requests
+// loggingMiddleware logs all requests and records generic endpoint traffic
+// (all server requests) into the metrics store.
 func (h *Handler) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// Create response wrapper for status code capture
+		// Create response wrapper for status code + byte capture
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
 		next.ServeHTTP(rw, r)
@@ -248,7 +248,93 @@ func (h *Handler) loggingMiddleware(next http.Handler) http.Handler {
 		}
 
 		event.Msg("Request")
+
+		// Record ALL traffic for the server-usage views. Infrastructure
+		// self-polling (Prometheus scrapes, healthchecks, the dashboard's
+		// own refresh) is excluded so real usage stays visible.
+		if h.metrics != nil && !metrics.UntrackedPaths[r.URL.Path] && r.Method != http.MethodOptions {
+			route := normalizeRoute(r.Method, r.URL.Path)
+			h.metrics.RecordEndpoint(r.Method, route, rw.statusCode, duration, rw.bytesWritten)
+			if h.prometheus != nil {
+				h.prometheus.RecordEndpointTraffic(route, rw.statusCode, duration, rw.bytesWritten)
+			}
+		}
 	})
+}
+
+// normalizeRoute maps a request path to a stable grouping key: known API
+// routes stay verbatim, dynamic segments collapse to {id}, static assets
+// group under /ui/*.
+func normalizeRoute(method, path string) string {
+	switch path {
+	case "/v1/chat/completions", "/v1/models", "/api/pow/challenge",
+		"/api/pow/redeem", "/stats", "/":
+		return path
+	case "/health":
+		return "/health"
+	}
+	if strings.HasPrefix(path, "/v1/models/") {
+		return "/v1/models/{id}"
+	}
+	// Static UI assets group under one bucket.
+	for _, ext := range []string{".js", ".css", ".html", ".ico", ".png", ".svg", ".map", ".woff2"} {
+		if strings.HasSuffix(path, ext) {
+			return "/ui/{file}"
+		}
+	}
+	var b strings.Builder
+	for _, seg := range strings.Split(strings.Trim(path, "/"), "/") {
+		b.WriteByte('/')
+		switch {
+		case seg == "":
+			// skip empty (trailing slash)
+			if b.Len() == 1 {
+				b.Reset()
+				b.WriteString("/")
+			}
+		case isDynamicSegment(seg):
+			b.WriteString("{id}")
+		default:
+			b.WriteString(seg)
+		}
+	}
+	out := b.String()
+	if out == "" || out == "/" {
+		out = path
+		if len(out) > 64 {
+			out = path[:64] + "…"
+		}
+	}
+	return out
+}
+
+// isDynamicSegment reports whether a path segment looks like an identifier
+// (numeric, UUID/hex blob, or long opaque token) rather than a static name.
+func isDynamicSegment(seg string) bool {
+	if len(seg) >= 20 {
+		return true
+	}
+	digits := true
+	for _, c := range seg {
+		if c < '0' || c > '9' {
+			digits = false
+			break
+		}
+	}
+	if digits && seg != "" {
+		return true
+	}
+	// hex-ish with at least one digit and one letter (uuid fragments etc.)
+	hasDigit, hasAlpha := false, false
+	for _, c := range seg {
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'):
+			hasAlpha = true
+		}
+	}
+	return hasDigit && hasAlpha && len(seg) > 6
 }
 
 // corsMiddleware adds CORS headers
@@ -1131,6 +1217,13 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp["metrics"] = snap
+		resp["server"] = snap.Server
+	}
+
+	// Host + process specifications (CPU, memory, disk, uptime).
+	if h.metrics != nil {
+		dataDir := filepath.Dir(h.cfg.MetricsDBPath)
+		resp["system"] = metrics.CollectSystemInfo(dataDir)
 	}
 
 	h.writeJSON(w, http.StatusOK, resp)
@@ -1225,15 +1318,23 @@ func shouldSkipHeader(key string) bool {
 	}
 }
 
-// responseWriter wraps http.ResponseWriter to capture status code
+// responseWriter wraps http.ResponseWriter to capture status code and the
+// number of bytes written (for traffic accounting).
 type responseWriter struct {
 	http.ResponseWriter
-	statusCode int
+	statusCode   int
+	bytesWritten int64
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytesWritten += int64(n)
+	return n, err
 }
 
 // Flush implements http.Flusher so SSE streaming works through the
