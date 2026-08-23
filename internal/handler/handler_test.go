@@ -14,6 +14,7 @@ import (
 
 	"github.com/hansputera/opencode-multi-agents/internal/config"
 	"github.com/hansputera/opencode-multi-agents/internal/proxy"
+	powpkg "github.com/hansputera/opencode-multi-agents/internal/pow"
 	"github.com/rs/zerolog"
 )
 
@@ -1002,4 +1003,62 @@ func TestStreamUsageChunkRelay(t *testing.T) {
 	if !strings.Contains(res.Header.Get("X-Accel-Buffering"), "no") {
 		t.Errorf("missing X-Accel-Buffering: no header")
 	}
+}
+
+// TestResolveAuthStripsGatewayKeys verifies gateway-local credentials
+// (env keys and PoW-issued keys) are NOT forwarded upstream — the upstream
+// gets the configured/fallback credential instead. Regression for upstream
+// "AuthError: Invalid API key" when browsers send their sk-gw-* key.
+func TestResolveAuthStripsGatewayKeys(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.UpstreamAPIKey = "zent-config"
+	h := &Handler{cfg: cfg, envKeys: map[string]bool{}}
+	h.envKeys["sk-gw-envkey"] = true
+
+	// PoW-issued key resolves through the service.
+	svc, err := newPoWService(func() *config.Config { c := config.DefaultConfig(); c.PowStorePath = t.TempDir() + "/pow.db"; return c }(), testLogger())
+	if err != nil {
+		t.Fatalf("pow service: %v", err)
+	}
+	h.pow = svc
+	issued := "sk-gw-issued1234"
+	svc.cacheKey(powpkg.APIKey{
+		KeyHash:   powpkg.KeyHash(issued),
+		Prefix:    issued[:16],
+		Plan:      "basic",
+		RPM:       100,
+		CreatedAt: time.Now().Unix(),
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+
+	cases := []struct {
+		name       string
+		xAPIKey    string
+		auth       string
+		wantHeader string
+		wantValue  string
+	}{
+		{name: "env gateway key stripped", auth: "Bearer sk-gw-envkey", wantHeader: "Authorization", wantValue: "Bearer zent-config"},
+		{name: "PoW-issued key stripped", auth: "Bearer " + issued, wantHeader: "Authorization", wantValue: "Bearer zent-config"},
+		{name: "real provider key forwarded", auth: "Bearer sk-ant-real-creds", wantHeader: "Authorization", wantValue: "Bearer sk-ant-real-creds"},
+		{name: "no client key uses config", wantHeader: "Authorization", wantValue: "Bearer zent-config"},
+		{name: "gateway x-api-key stripped", xAPIKey: "sk-gw-envkey", wantHeader: "Authorization", wantValue: "Bearer zent-config"},
+		{name: "real x-api-key forwarded", xAPIKey: "v2-public", wantHeader: "x-api-key", wantValue: "v2-public"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			if tt.xAPIKey != "" {
+				r.Header.Set("x-api-key", tt.xAPIKey)
+			}
+			if tt.auth != "" {
+				r.Header.Set("Authorization", tt.auth)
+			}
+			got := h.resolveAuth(r)
+			if got.Header != tt.wantHeader || got.Value != tt.wantValue {
+				t.Errorf("resolveAuth() = {%s: %s}, want {%s: %s}", got.Header, got.Value, tt.wantHeader, tt.wantValue)
+			}
+		})
+	}
+	svc.Close()
 }

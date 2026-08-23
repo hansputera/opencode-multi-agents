@@ -300,20 +300,42 @@ func GetRequestID(ctx context.Context) string {
 }
 
 // resolveAuth picks the upstream auth header per request:
-//  1. client's x-api-key header, if non-empty (empty/whitespace is ignored
-//     so a stale "x-api-key:" never reaches the upstream)
-//  2. client's Authorization Bearer header (if non-empty)
+//  1. client's x-api-key header, if it is a REAL provider key (gateway-local
+//     keys are stripped — they authenticate the caller to us, not to the
+//     upstream)
+//  2. client's Authorization Bearer header, same rule
 //  3. a random key from UPSTREAM_API_KEYS (spreads quota/rate limits across
 //     multiple accounts when the client sends no key)
 //  4. the configured UPSTREAM_API_KEY (as Bearer)
 //  5. OpenCode Zen's public access via "x-api-key: public"
 func (h *Handler) resolveAuth(r *http.Request) upstream.Auth {
-	if key := strings.TrimSpace(r.Header.Get("x-api-key")); key != "" {
-		return upstream.Auth{Header: "x-api-key", Value: key}
+	// Gateway-local credentials: env keys and PoW-issued keys. These admit
+	// the client through gatewayAuthMiddleware but are meaningless to the
+	// upstream provider — forwarding them causes upstream AuthError.
+	isGatewayKey := func(k string) bool {
+		if k == "" {
+			return false
+		}
+		if h.envKeys[k] {
+			return true
+		}
+		if h.pow == nil {
+			return false
+		}
+		_, _, ok := h.pow.LookupKey(pow.KeyHash(k))
+		return ok
 	}
-	if key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); key != "" {
-		return upstream.Auth{Header: "Authorization", Value: "Bearer " + key}
+
+	xKey := strings.TrimSpace(r.Header.Get("x-api-key"))
+	if xKey != "" && !isGatewayKey(xKey) {
+		return upstream.Auth{Header: "x-api-key", Value: xKey}
 	}
+
+	bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if bearer != "" && !isGatewayKey(bearer) {
+		return upstream.Auth{Header: "Authorization", Value: "Bearer " + bearer}
+	}
+
 	if len(h.cfg.UpstreamAPIKeys) > 0 {
 		return authForEntry(h.cfg.UpstreamAPIKeys[rand.IntN(len(h.cfg.UpstreamAPIKeys))])
 	}

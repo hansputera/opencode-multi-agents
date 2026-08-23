@@ -210,12 +210,20 @@ const GetKeyView = {
     if (!el || run.found) return;
     const hps = run.hpsCpu + run.hpsGpu;
     el.textContent = fmtCompactNum(hps);
+
+    // Solving is memoryless: every hash succeeds with p = 1/2^difficulty.
+    // Therefore:
+    //   - ETA at the current hashrate is CONSTANT (2^diff / hps), never
+    //     decreasing — a countdown would be dishonest for a random process;
+    //   - "progress" is the probability that an honest solver would have
+    //     finished by now: P = 1 - e^(-tried/2^diff), capped at 99%.
     const expected = Math.pow(2, run.ch.difficulty);
-    const done = hps * (Date.now() - run.startedAt) / 1000;
+    const tried = hps * (Date.now() - run.startedAt) / 1000;
+    const prob = 1 - Math.exp(-tried / expected);
     const bar = $('#pow-progress');
-    if (bar) bar.style.width = Math.min(99, done / expected * 100).toFixed(1) + '%';
+    if (bar) bar.style.width = Math.min(99, prob * 100).toFixed(1) + '%';
     const etaEl = $('#pow-eta');
-    if (etaEl) etaEl.textContent = hps > 0 ? fmtDuration((expected - done) / hps) : '—';
+    if (etaEl) etaEl.textContent = hps > 0 ? '≈ ' + fmtDuration(expected / hps) : '—';
   },
 
   updateEngineLabel(run) {
@@ -461,7 +469,10 @@ class GPUSolver {
     const L = prefix.length + 10;
     const numWords = Math.ceil((L + 9) / 64) * 16; // whole 64-byte blocks
     if (numWords > 128) throw new Error('preimage too long for GPU kernel');
-    const words = new Uint32Array(numWords);
+    // Storage buffer layout: [message words | digitWord[10] | digitShift[10]].
+    // Digit tables live here (not in the uniform Params) because the WGSL
+    // uniform address space requires 16-byte array element strides.
+    const words = new Uint32Array(numWords + 20);
     const all = prefix + '0000000000';
     for (let i = 0; i < all.length; i++) {
       words[i >> 2] |= (all.charCodeAt(i) & 0xff) << (24 - 8 * (i % 4)); // BE
@@ -469,20 +480,18 @@ class GPUSolver {
     words[L >> 2] |= 0x80 << (24 - 8 * (L % 4));
     words[numWords - 1] = (L * 8) >>> 0; // bit length (always < 2^32 here)
 
-    const digitWord = [], digitShift = [];
     const off0 = prefix.length;
     for (let j = 0; j < 10; j++) {
       const p = off0 + j;
-      digitWord.push(p >> 2);
-      digitShift.push(24 - 8 * (p % 4));
+      words[numWords + j] = p >> 2;              // digitWord[j]
+      words[numWords + 10 + j] = 24 - 8 * (p % 4); // digitShift[j]
     }
-    return { words, numWords, digitWord, digitShift };
+    return { words, numWords };
   }
 
   packParams(t, base, threads, items, lanes, difficulty) {
-    const p = new Uint32Array(32);
+    const p = new Uint32Array(8);
     p[0] = t.numWords; p[1] = difficulty; p[2] = base; p[3] = items; p[4] = lanes;
-    for (let j = 0; j < 10; j++) { p[6 + j] = t.digitWord[j]; p[16 + j] = t.digitShift[j]; }
     return p;
   }
 
@@ -621,9 +630,6 @@ struct Params {
   base     : u32,
   items    : u32,
   lanes    : u32,
-  _pad0    : u32,
-  digitWord: array<u32, 10>,
-  digitShift: array<u32, 10>,
 };
 
 @group(0) @binding(0) var<storage, read> msg : array<u32>;
@@ -694,12 +700,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var j: u32 = 0u; j < params.items; j++) {
     let counter = params.base + (tid * params.items + j) * params.lanes;
     // Patch the 10 decimal digits of the counter into the message.
+    // Digit word-index/shift tables live at msg[numWords .. numWords+19]
+    // (storage address space permits dynamic indexing with 4-byte stride).
     var cc = counter;
     for (var p: i32 = 9; p >= 0; p--) {
       let dig = cc % 10u;
       cc = cc / 10u;
-      let wi = params.digitWord[u32(p)];
-      let sh = params.digitShift[u32(p)];
+      let pi = u32(p);
+      let wi = msg[params.numWords + pi];
+      let sh = msg[params.numWords + 10u + pi];
       m[wi] = (m[wi] & ~(0xFFu << sh)) | ((0x30u + dig) << sh);
     }
     // SHA-256 over the full padded message.
