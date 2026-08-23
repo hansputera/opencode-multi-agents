@@ -83,6 +83,9 @@ If a certificate key conflicts (409/2500), the gateway regenerates the Ed25519 k
 | `UPSTREAM_API_KEY` | Upstream API key (OpenCode Zen: `zent-...`). Leave empty for the public tier — the gateway then authenticates with `x-api-key: public` | - |
 | `UPSTREAM_API_KEYS` | Comma-separated key list; a **random** key is picked per request (when the client sends no `Authorization`) to spread quota/rate limits across accounts. Entries: `public`, `zent-...`, or `header:value` | - |
 | `GATEWAY_API_KEYS` | Comma-separated gateway keys. When set, `/v1/*` requires `Authorization: Bearer <key>` (401 otherwise); empty keeps the API open | - |
+| `POW_ENABLED` | Gate `/v1/*` behind PoW-issued keys (env keys still work) | `false` (`true` in compose) |
+| `POW_KEY_TTL` | Lifetime of issued API keys | `168h` (7 days) |
+| `POW_BURST_RPS` / `POW_BURST_COOLDOWN` | Burst abuse guard: requests/sec that trips a key cooldown | `5` / `5m` |
 | `UPSTREAM_PROVIDER` | Upstream driver: `zen` (default, raw OpenAI-compatible), `opencode` (drive an [OpenCode Server](https://opencode.ai/docs/server) via HTTP) or `opencode-cli` (docker-exec `opencode run` inside each VPN container). In all cases each request egresses through a unique per-container VPN IP | `zen` |
 | `OPENCODE_SERVER_URL` | Base URL of `opencode serve` (used when `UPSTREAM_PROVIDER=opencode`). Must be reachable through the proxy container's SOCKS5 tunnel | `http://127.0.0.1:4096` |
 | `OPENCODE_SERVER_PASSWORD` | Optional `OPENCODE_SERVER_PASSWORD` for OpenCode Server basic auth (`opencode`-mode) | - |
@@ -166,6 +169,22 @@ The gateway ships a server-side `web_search` tool (enabled by default on the `ze
 - Providers: self-hosted [SearXNG](https://docs.searxng.org/) (`SEARXNG_URL`), Brave Search API (`BRAVE_API_KEY`), or keyless DuckDuckGo (fallback).
 - Tuning: `WEB_SEARCH_MAX_RESULTS`, `WEB_SEARCH_MAX_PAGES`, `WEB_SEARCH_MAX_PAGE_CHARS`, `WEB_SEARCH_MAX_ROUNDS`.
 - Client-defined tools always win: if your request already defines `web_search`, yours is used and the gateway never intercepts. Mixed turns (your tools + search) are relayed untouched for you to drive.
+
+### PoW-Gated Free API Keys
+
+With `POW_ENABLED=true` (default in docker-compose), `/v1/*` requires an API key: either from `GATEWAY_API_KEYS` or a **free key earned by solving a proof-of-work challenge** (Hashcash-style, BLAKE3/SHA-256, single-use, time-limited, bound to the requester).
+
+| Plan | PoW effort | Rate limit |
+|---|---|---|
+| `basic` | base difficulty (~30–90 s) | 100 req/min |
+| `plus` | +4 bits (~16× work) | 250 req/min |
+| `pro` | +8 bits (~256× work) | 500 req/min |
+
+- Difficulty adapts automatically (server-measured solve times feed an EWMA controller); per-IP bonuses make key farming progressively harder; challenge floods trigger global escalation.
+- Keys expire after 7 days (`POW_KEY_TTL`) and are stored hashed. Bursting above `POW_BURST_RPS` (default 5 req/s) cools the key down for `POW_BURST_COOLDOWN` (default 5 min).
+- **Browser**: open the gateway UI → 🔑 Key → pick plan → solve (CPU workers + WebGPU GPU kernel with progress/H/s/ETA/cancel; pauses when tab hidden).
+- **CLI**: `go run ./cmd/powsolver --server http://localhost:8082 --plan basic` (multi-core BLAKE3).
+- Endpoints: `GET /api/pow/challenge?plan=basic|plus|pro[&algo=blake3|sha256]`, `POST /api/pow/redeem` `{challenge_id, counters:[...]}` → `{api_key, plan, rpm, expires_at}`.
 
 **Example (non-streaming):**
 ```bash

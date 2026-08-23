@@ -57,6 +57,30 @@ type Config struct {
 	// rotated (container replaced) before giving up and keeping one duplicate.
 	// Values <= 1 disable extra rotation.
 	ProxyIPRotateAttempts int `yaml:"proxy_ip_rotate_attempts" env:"PROXY_IP_ROTATE_ATTEMPTS"`
+
+	// --- PoW-gated API keys ---
+	//
+	// When PowEnabled, /v1/* requires a valid API key: either one from
+	// GATEWAY_API_KEYS or a PoW-issued key (clients solve a hashcash-style
+	// challenge at /api/pow/challenge and redeem it at /api/pow/redeem).
+	PowEnabled            bool          `yaml:"pow_enabled" env:"POW_ENABLED"`
+	PowStorePath          string        `yaml:"pow_store_path" env:"POW_STORE_PATH"`
+	PowChallengeTTL       time.Duration `yaml:"pow_challenge_ttl" env:"POW_CHALLENGE_TTL"`
+	PowKeyTTL             time.Duration `yaml:"pow_key_ttl" env:"POW_KEY_TTL"`
+	PowBaseDifficulty     int           `yaml:"pow_base_difficulty" env:"POW_BASE_DIFFICULTY"`
+	PowMinDifficulty      int           `yaml:"pow_min_difficulty" env:"POW_MIN_DIFFICULTY"`
+	PowMaxDifficulty      int           `yaml:"pow_max_difficulty" env:"POW_MAX_DIFFICULTY"`
+	PowPlan1Difficulty    int           `yaml:"pow_plan1_difficulty" env:"POW_PLAN1_DIFFICULTY"`
+	PowPlan2Difficulty    int           `yaml:"pow_plan2_difficulty" env:"POW_PLAN2_DIFFICULTY"`
+	PowPlan3Difficulty    int           `yaml:"pow_plan3_difficulty" env:"POW_PLAN3_DIFFICULTY"`
+	PowPlan1RPM           int           `yaml:"pow_plan1_rpm" env:"POW_PLAN1_RPM"`
+	PowPlan2RPM           int           `yaml:"pow_plan2_rpm" env:"POW_PLAN2_RPM"`
+	PowPlan3RPM           int           `yaml:"pow_plan3_rpm" env:"POW_PLAN3_RPM"`
+	PowBurstRPS           int           `yaml:"pow_burst_rps" env:"POW_BURST_RPS"`
+	PowBurstCooldown      time.Duration `yaml:"pow_burst_cooldown" env:"POW_BURST_COOLDOWN"`
+	PowChallengePerMin    int           `yaml:"pow_challenge_per_min" env:"POW_CHALLENGE_RATE_PER_MIN"`
+	PowChallengePerDay    int           `yaml:"pow_challenge_per_day" env:"POW_CHALLENGE_RATE_PER_DAY"`
+	PowAdjustInterval     time.Duration `yaml:"pow_adjust_interval" env:"POW_ADJUST_INTERVAL"`
 	VPNImage            string        `yaml:"vpn_image" env:"VPN_IMAGE"`
 	CooldownDuration    time.Duration `yaml:"cooldown_duration" env:"RATE_LIMIT_COOLDOWN"`
 	HealthCheckPeriod   time.Duration `yaml:"health_check_period" env:"HEALTH_CHECK_PERIOD"`
@@ -155,6 +179,24 @@ func DefaultConfig() *Config {
 		ProxyPoolSize:       3,
 		ProxyBasePort:       10801,
 		ProxyIPRotateAttempts: 3,
+		PowEnabled:            false, // opt-in: set POW_ENABLED=true to gate /v1/*
+		PowStorePath:          "data/pow.db",
+		PowChallengeTTL:       10 * time.Minute,
+		PowKeyTTL:             7 * 24 * time.Hour,
+		PowBaseDifficulty:     24,
+		PowMinDifficulty:      20,
+		PowMaxDifficulty:      40,
+		PowPlan1Difficulty:    0,
+		PowPlan2Difficulty:    4,
+		PowPlan3Difficulty:    8,
+		PowPlan1RPM:           100,
+		PowPlan2RPM:           250,
+		PowPlan3RPM:           500,
+		PowBurstRPS:           5,
+		PowBurstCooldown:      5 * time.Minute,
+		PowChallengePerMin:    6,
+		PowChallengePerDay:    60,
+		PowAdjustInterval:     30 * time.Second,
 		VPNImage:            "ghcr.io/tprasadtp/protonwire:latest",
 		ProtonVPNAPIBase:    "https://account.protonvpn.com",
 		ProtonVPNVpnAPIBase: "https://vpn-api.proton.me",
@@ -319,6 +361,92 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("PROXY_IP_ROTATE_ATTEMPTS"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			c.ProxyIPRotateAttempts = i
+		}
+	}
+	if v := os.Getenv("POW_ENABLED"); v != "" {
+		c.PowEnabled = strings.EqualFold(v, "true") || v == "1" || strings.EqualFold(v, "yes")
+	}
+	if v := os.Getenv("POW_STORE_PATH"); v != "" {
+		c.PowStorePath = v
+	}
+	if v := os.Getenv("POW_CHALLENGE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.PowChallengeTTL = d
+		}
+	}
+	if v := os.Getenv("POW_KEY_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.PowKeyTTL = d
+		}
+	}
+	if v := os.Getenv("POW_BASE_DIFFICULTY"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowBaseDifficulty = i
+		}
+	}
+	if v := os.Getenv("POW_MIN_DIFFICULTY"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowMinDifficulty = i
+		}
+	}
+	if v := os.Getenv("POW_MAX_DIFFICULTY"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowMaxDifficulty = i
+		}
+	}
+	if v := os.Getenv("POW_PLAN1_DIFFICULTY"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowPlan1Difficulty = i
+		}
+	}
+	if v := os.Getenv("POW_PLAN2_DIFFICULTY"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowPlan2Difficulty = i
+		}
+	}
+	if v := os.Getenv("POW_PLAN3_DIFFICULTY"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowPlan3Difficulty = i
+		}
+	}
+	if v := os.Getenv("POW_PLAN1_RPM"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowPlan1RPM = i
+		}
+	}
+	if v := os.Getenv("POW_PLAN2_RPM"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowPlan2RPM = i
+		}
+	}
+	if v := os.Getenv("POW_PLAN3_RPM"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowPlan3RPM = i
+		}
+	}
+	if v := os.Getenv("POW_BURST_RPS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowBurstRPS = i
+		}
+	}
+	if v := os.Getenv("POW_BURST_COOLDOWN"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.PowBurstCooldown = d
+		}
+	}
+	if v := os.Getenv("POW_CHALLENGE_RATE_PER_MIN"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowChallengePerMin = i
+		}
+	}
+	if v := os.Getenv("POW_CHALLENGE_RATE_PER_DAY"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.PowChallengePerDay = i
+		}
+	}
+	if v := os.Getenv("POW_ADJUST_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.PowAdjustInterval = d
 		}
 	}
 	if v := os.Getenv("WARP_IMAGE"); v != "" {

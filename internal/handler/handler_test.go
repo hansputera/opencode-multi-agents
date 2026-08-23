@@ -88,11 +88,11 @@ func TestResolveAuth(t *testing.T) {
 	h.cfg.UpstreamAPIKey = "zent-configured"
 
 	tests := []struct {
-		name        string
-		apiKey      string
-		auth        string
-		wantHeader  string
-		wantValue   string
+		name       string
+		apiKey     string
+		auth       string
+		wantHeader string
+		wantValue  string
 	}{
 		{name: "client x-api-key wins", apiKey: "public", wantHeader: "x-api-key", wantValue: "public"},
 		{name: "empty x-api-key ignored, bearer wins", apiKey: "", auth: "Bearer zent-client", wantHeader: "Authorization", wantValue: "Bearer zent-client"},
@@ -511,6 +511,7 @@ func TestPublicTierRateLimitShortCircuits(t *testing.T) {
 		t.Errorf("after self-heal pool = idle=%d cooldown=%d, want idle=1 cooldown=0 (banned proxy replaced and pruned)", stats.Idle, stats.Cooldown)
 	}
 }
+
 // Run with: ZEN_LIVE=1 go test ./internal/handler/ -run TestZenLiveModels -v
 // Uses a local SOCKS5 proxy (no VPN containers required).
 func TestZenLiveModels(t *testing.T) {

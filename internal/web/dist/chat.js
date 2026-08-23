@@ -48,6 +48,7 @@ const ChatView = {
             </div>
             <div class="flex items-center gap-2 shrink-0">
               <select id="model-select" class="neo-input px-3 py-1.5 text-sm font-bold max-w-[220px]"></select>
+              <a href="#/getkey" class="neo-btn px-3 py-1.5 text-sm bg-yellow">🔑</a>
               <a href="#/dashboard" class="neo-btn px-3 py-1.5 text-sm bg-purple">📊</a>
             </div>
           </header>
@@ -440,9 +441,13 @@ const ChatView = {
       this.scrollBottom();
     };
 
+    const headers = { 'Content-Type': 'application/json' };
+    const apiKey = localStorage.getItem('neo.apiKey');
+    if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+
     fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: agent.signal,
     })

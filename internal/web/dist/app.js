@@ -14,7 +14,8 @@ const App = {
       history.replaceState(null, '', hash);
     }
     const name = hash.replace(/^#\/?/, '').split('?')[0] || 'dashboard';
-    const view = name === 'chat' ? ChatView : DashboardView;
+    const views = { chat: ChatView, getkey: GetKeyView };
+    const view = views[name] || DashboardView;
 
     if (this.current && this.current.destroy) {
       this.current.destroy();
@@ -36,6 +37,12 @@ function $$(sel, root = document) {
 
 async function api(path, options = {}) {
   try {
+    // Attach the PoW-issued key (if present) to gateway API calls.
+    if (path.startsWith('/v1/') && !options.headers) options.headers = {};
+    if (path.startsWith('/v1/')) {
+      const k = localStorage.getItem('neo.apiKey');
+      if (k && !options.headers['Authorization']) options.headers['Authorization'] = 'Bearer ' + k;
+    }
     const res = await fetch(path, options);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {

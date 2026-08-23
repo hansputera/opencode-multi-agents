@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hansputera/opencode-multi-agents/internal/config"
 	"github.com/hansputera/opencode-multi-agents/internal/metrics"
+	"github.com/hansputera/opencode-multi-agents/internal/pow"
 	"github.com/hansputera/opencode-multi-agents/internal/proxy"
 	"github.com/hansputera/opencode-multi-agents/internal/upstream"
 	"github.com/hansputera/opencode-multi-agents/internal/web"
@@ -38,12 +39,27 @@ type Handler struct {
 
 	// socksClients caches one HTTP client per proxy ID for web search /
 	// page fetching, so those requests egress through the same VPN tunnel.
-	wsMu        sync.Mutex
-	wsClients   map[string]*http.Client
+	wsMu      sync.Mutex
+	wsClients map[string]*http.Client
+
+	// PoW-gated API keys: env keys are exact-match; issued keys resolve
+	// through the PoW service (cache + SQLite). nil when POW_ENABLED=false.
+	envKeys map[string]bool
+	pow     *PoWService
 }
 
 // New creates a new HTTP handler
 func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Store, log *zerolog.Logger) http.Handler {
+	h := newHandler(cfg, pool, metricsStore, log)
+	return h.loggingMiddleware(h.requestIDMiddleware(h.corsMiddleware(h.gatewayAuthMiddleware(h.mux))))
+}
+
+// PowService exposes the PoW gate service (nil when POW_ENABLED=false).
+func (h *Handler) PowService() *PoWService { return h.pow }
+
+// newHandler builds the handler with all routes registered but without
+// middleware wrapping. Split from New so tests can inspect internals.
+func newHandler(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Store, log *zerolog.Logger) *Handler {
 	var client upstream.Upstream
 	driver := cfg.UpstreamProvider
 	switch driver {
@@ -59,6 +75,11 @@ func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Stor
 	prometheus := metrics.NewPrometheusExporter(metricsStore)
 	pricing := metrics.NewPricingTable(cfg.ModelPricing)
 
+	envKeys := make(map[string]bool, len(cfg.GatewayAPIKeys))
+	for _, k := range cfg.GatewayAPIKeys {
+		envKeys[k] = true
+	}
+
 	h := &Handler{
 		cfg:        cfg,
 		pool:       pool,
@@ -70,6 +91,19 @@ func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Stor
 		mux:        http.NewServeMux(),
 		wsDriver:   driver,
 		wsClients:  make(map[string]*http.Client),
+		envKeys:    envKeys,
+	}
+
+	// Optional PoW gate (challenge/redeem endpoints + issued-key auth).
+	if cfg.PowEnabled {
+		svc, err := newPoWService(cfg, log)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to start PoW service; /v1/* will only accept GATEWAY_API_KEYS")
+		} else {
+			h.pow = svc
+			h.mux.HandleFunc("GET /api/pow/challenge", svc.handleChallenge)
+			h.mux.HandleFunc("POST /api/pow/redeem", svc.handleRedeem)
+		}
 	}
 
 	// Register routes
@@ -89,9 +123,7 @@ func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Stor
 	// Serve the web UI
 	h.mux.Handle("/", web.Handler())
 
-	// Middleware (outermost first): gateway auth sits inside CORS so 401s
-	// carry CORS headers for browser clients.
-	return h.loggingMiddleware(h.requestIDMiddleware(h.corsMiddleware(h.gatewayAuthMiddleware(h.mux))))
+	return h
 }
 
 // handleV1Fallback answers unmatched /v1/* requests with OpenAI-style JSON
@@ -113,27 +145,81 @@ func (h *Handler) handleV1Fallback(w http.ResponseWriter, r *http.Request) {
 		"", "unknown_url")
 }
 
-// gatewayAuthMiddleware enforces the configured gateway API keys on all
-// /v1/* endpoints. When no keys are configured the API stays open. Keys are
-// compared as exact Bearer token matches.
+// keyIdentity describes a resolved API key.
+type keyIdentity struct {
+	Env     bool   // GATEWAY_API_KEYS entry (admin: no plan limits)
+	KeyHash string // SHA-256 of the bearer token (issued keys only)
+	Plan    string
+	RPM     int
+}
+
+// lookupKey resolves a bearer token against env keys and PoW-issued keys.
+func (h *Handler) lookupKey(bearer string) (keyIdentity, bool) {
+	if bearer == "" {
+		return keyIdentity{}, false
+	}
+	if h.envKeys[bearer] {
+		return keyIdentity{Env: true}, true
+	}
+	if h.pow == nil {
+		return keyIdentity{}, false
+	}
+	kh := pow.KeyHash(bearer)
+	plan, rpm, ok := h.pow.LookupKey(kh)
+	if !ok {
+		return keyIdentity{}, false
+	}
+	return keyIdentity{KeyHash: kh, Plan: plan, RPM: rpm}, true
+}
+
+// authRequired reports whether /v1/* must reject anonymous requests:
+// whenever explicit env keys exist or the PoW gate is on.
+func (h *Handler) authRequired() bool {
+	return len(h.envKeys) > 0 || h.pow != nil
+}
+
+// gatewayAuthMiddleware enforces API keys on all /v1/* endpoints and applies
+// per-key plan limits (burst cooldown + RPM buckets) to PoW-issued keys.
+// Env keys are unlimited admins. When neither GATEWAY_API_KEYS nor the PoW
+// gate is configured, /v1/* stays open (legacy behavior).
 func (h *Handler) gatewayAuthMiddleware(next http.Handler) http.Handler {
-	if len(h.cfg.GatewayAPIKeys) == 0 {
-		return next
-	}
-	keys := make(map[string]bool, len(h.cfg.GatewayAPIKeys))
-	for _, k := range h.cfg.GatewayAPIKeys {
-		keys[k] = true
-	}
+	requireAuth := h.authRequired()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v1/") {
-			key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if key == "" || !keys[key] {
-				h.writeOpenAIError(w, http.StatusUnauthorized,
-					"Incorrect API key provided. You can find your API key in the gateway configuration.",
-					"", "invalid_api_key")
-				return
-			}
+		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+			next.ServeHTTP(w, r)
+			return
 		}
+
+		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		id, ok := h.lookupKey(bearer)
+		if strings.HasPrefix(r.URL.Path, "/v1/models") {
+		}
+
+		switch {
+		case ok && id.Env:
+			// Admin key: no plan limiting.
+		case ok:
+			// Issued key: enforce burst cooldown + plan RPM.
+			if h.pow != nil {
+				retryAfter, code := h.pow.checkKeyLimits(id.KeyHash, id.RPM)
+				if retryAfter > 0 {
+					w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
+					w.Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", id.RPM))
+					powErr(w, http.StatusTooManyRequests,
+						fmt.Sprintf("Plan %q limit reached (%s); retry after %d second(s)", id.Plan, code, int(retryAfter.Seconds())+1),
+						code)
+					return
+				}
+			}
+		case bearer == "" && !requireAuth:
+			// Legacy open mode: no keys configured anywhere.
+		default:
+			h.writeOpenAIError(w, http.StatusUnauthorized,
+				"Incorrect API key provided. Get a free key by solving a challenge at #/getkey.",
+				"", "invalid_api_key")
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -510,12 +596,12 @@ var validChatRoles = map[string]bool{
 // chatRequest mirrors the OpenAI chat completion request fields the gateway
 // needs to inspect; everything else passes through to the upstream verbatim.
 type chatRequest struct {
-	Model         string        `json:"model"`
-	Messages      []chatMessage `json:"messages"`
-	Stream        bool          `json:"stream"`
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
 	// ConversationID is a gateway extension for sticky sessions.
 	ConversationID string `json:"conversation_id,omitempty"`
-	StreamOptions *struct {
+	StreamOptions  *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options,omitempty"`
 }
@@ -807,8 +893,8 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 	sawUsageChunk := false
 	interrupted := false
 
-	var buffered []string                       // withheld lines while a tool-call turn is in flight
-	accs := map[int]*toolCallAccum{}            // assembled calls by index
+	var buffered []string            // withheld lines while a tool-call turn is in flight
+	accs := map[int]*toolCallAccum{} // assembled calls by index
 	callOrder := []int{}
 	finishToolCalls := false
 
@@ -867,7 +953,7 @@ func (h *Handler) handleStreamResponse(w http.ResponseWriter, resp *http.Respons
 			}
 
 			var chunk struct {
-				Usage *upstream.Usage `json:"usage,omitempty"`
+				Usage   *upstream.Usage `json:"usage,omitempty"`
 				Choices []struct {
 					Delta struct {
 						ToolCalls []struct {
