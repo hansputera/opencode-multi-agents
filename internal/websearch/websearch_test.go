@@ -94,8 +94,8 @@ func TestBraveParse(t *testing.T) {
 
 func TestUnwrapDDGURL(t *testing.T) {
 	cases := map[string]string{
-		"https://direct.example.com/x":                    "https://direct.example.com/x",
-		"//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.b%2Fc":  "https://a.b/c",
+		"https://direct.example.com/x":                   "https://direct.example.com/x",
+		"//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.b%2Fc": "https://a.b/c",
 	}
 	for in, want := range cases {
 		if got := unwrapDDGURL(in); got != want {

@@ -143,10 +143,10 @@ func (c *OpenCodeCLIClient) runArgs(model, sessionID, prompt string) []string {
 // ---------------------------------------------------------------------------
 
 type cliChoice struct {
-	Index   int        `json:"index"`
-	Delta   *cliDelta  `json:"delta,omitempty"`
+	Index   int         `json:"index"`
+	Delta   *cliDelta   `json:"delta,omitempty"`
 	Message *cliMessage `json:"message,omitempty"`
-	Finish  string     `json:"finish_reason,omitempty"`
+	Finish  string      `json:"finish_reason,omitempty"`
 }
 
 // cliDelta carries content plus reasoning_content so the chat UI can render
@@ -164,12 +164,12 @@ type cliMessage struct {
 }
 
 type cliChatResponse struct {
-	ID      string       `json:"id"`
-	Object  string       `json:"object"`
-	Created int64        `json:"created"`
-	Model   string       `json:"model"`
-	Choices []cliChoice  `json:"choices"`
-	Usage   *Usage       `json:"usage,omitempty"`
+	ID      string      `json:"id"`
+	Object  string      `json:"object"`
+	Created int64       `json:"created"`
+	Model   string      `json:"model"`
+	Choices []cliChoice `json:"choices"`
+	Usage   *Usage      `json:"usage,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

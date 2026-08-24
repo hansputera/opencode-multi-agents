@@ -331,12 +331,12 @@ func (dm *DockerManager) CreateEx(ctx context.Context, bannedRegions, avoidServe
 			MemorySwap: dm.parseMemoryLimit(dm.cfg.ResourceMemoryLimit),
 		},
 		// ProtonVPN needs NET_ADMIN for WireGuard interface management
-		CapAdd: []string{"NET_ADMIN"},
+		CapAdd:     []string{"NET_ADMIN"},
 		Privileged: true,
 		Sysctls: map[string]string{
-			"net.ipv4.conf.all.rp_filter":       "2",
-			"net.ipv4.conf.all.src_valid_mark":  "1",
-			"net.ipv6.conf.all.disable_ipv6":    "1",
+			"net.ipv4.conf.all.rp_filter":      "2",
+			"net.ipv4.conf.all.src_valid_mark": "1",
+			"net.ipv6.conf.all.disable_ipv6":   "1",
 		},
 		AutoRemove: false, // We manage removal manually
 	}

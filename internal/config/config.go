@@ -36,7 +36,7 @@ type Config struct {
 	// gateway PUTs the client's bearer key to /auth/{providerID} derived from
 	// the Authorization header (e.g. "anthropic", "openai").
 	OpenCodeProviderID string `yaml:"opencode_provider_id" env:"OPENCODE_PROVIDER_ID"`
-	OpenCodeModel    string `yaml:"opencode_model" env:"OPENCODE_MODEL"`
+	OpenCodeModel      string `yaml:"opencode_model" env:"OPENCODE_MODEL"`
 
 	// opencode-cli mode: model override for `opencode run --model` (default
 	// empty = opencode's own default), the name of the provider env var that
@@ -50,8 +50,8 @@ type Config struct {
 	OpenCodeCLIModels      []string `yaml:"opencode_cli_models" env:"OPENCODE_CLI_MODELS"`
 
 	// Proxy pool configuration
-	ProxyPoolSize       int           `yaml:"proxy_pool_size" env:"PROXY_POOL_SIZE"`
-	ProxyBasePort       int           `yaml:"proxy_base_port" env:"PROXY_BASE_PORT"`
+	ProxyPoolSize int `yaml:"proxy_pool_size" env:"PROXY_POOL_SIZE"`
+	ProxyBasePort int `yaml:"proxy_base_port" env:"PROXY_BASE_PORT"`
 
 	// How many times a freshly created proxy with a duplicate egress IP is
 	// rotated (container replaced) before giving up and keeping one duplicate.
@@ -63,24 +63,24 @@ type Config struct {
 	// When PowEnabled, /v1/* requires a valid API key: either one from
 	// GATEWAY_API_KEYS or a PoW-issued key (clients solve a hashcash-style
 	// challenge at /api/pow/challenge and redeem it at /api/pow/redeem).
-	PowEnabled            bool          `yaml:"pow_enabled" env:"POW_ENABLED"`
-	PowStorePath          string        `yaml:"pow_store_path" env:"POW_STORE_PATH"`
-	PowChallengeTTL       time.Duration `yaml:"pow_challenge_ttl" env:"POW_CHALLENGE_TTL"`
-	PowKeyTTL             time.Duration `yaml:"pow_key_ttl" env:"POW_KEY_TTL"`
-	PowBaseDifficulty     int           `yaml:"pow_base_difficulty" env:"POW_BASE_DIFFICULTY"`
-	PowMinDifficulty      int           `yaml:"pow_min_difficulty" env:"POW_MIN_DIFFICULTY"`
-	PowMaxDifficulty      int           `yaml:"pow_max_difficulty" env:"POW_MAX_DIFFICULTY"`
-	PowPlan1Difficulty    int           `yaml:"pow_plan1_difficulty" env:"POW_PLAN1_DIFFICULTY"`
-	PowPlan2Difficulty    int           `yaml:"pow_plan2_difficulty" env:"POW_PLAN2_DIFFICULTY"`
-	PowPlan3Difficulty    int           `yaml:"pow_plan3_difficulty" env:"POW_PLAN3_DIFFICULTY"`
-	PowPlan1RPM           int           `yaml:"pow_plan1_rpm" env:"POW_PLAN1_RPM"`
-	PowPlan2RPM           int           `yaml:"pow_plan2_rpm" env:"POW_PLAN2_RPM"`
-	PowPlan3RPM           int           `yaml:"pow_plan3_rpm" env:"POW_PLAN3_RPM"`
-	PowBurstRPS           int           `yaml:"pow_burst_rps" env:"POW_BURST_RPS"`
-	PowBurstCooldown      time.Duration `yaml:"pow_burst_cooldown" env:"POW_BURST_COOLDOWN"`
-	PowChallengePerMin    int           `yaml:"pow_challenge_per_min" env:"POW_CHALLENGE_RATE_PER_MIN"`
-	PowChallengePerDay    int           `yaml:"pow_challenge_per_day" env:"POW_CHALLENGE_RATE_PER_DAY"`
-	PowAdjustInterval     time.Duration `yaml:"pow_adjust_interval" env:"POW_ADJUST_INTERVAL"`
+	PowEnabled          bool          `yaml:"pow_enabled" env:"POW_ENABLED"`
+	PowStorePath        string        `yaml:"pow_store_path" env:"POW_STORE_PATH"`
+	PowChallengeTTL     time.Duration `yaml:"pow_challenge_ttl" env:"POW_CHALLENGE_TTL"`
+	PowKeyTTL           time.Duration `yaml:"pow_key_ttl" env:"POW_KEY_TTL"`
+	PowBaseDifficulty   int           `yaml:"pow_base_difficulty" env:"POW_BASE_DIFFICULTY"`
+	PowMinDifficulty    int           `yaml:"pow_min_difficulty" env:"POW_MIN_DIFFICULTY"`
+	PowMaxDifficulty    int           `yaml:"pow_max_difficulty" env:"POW_MAX_DIFFICULTY"`
+	PowPlan1Difficulty  int           `yaml:"pow_plan1_difficulty" env:"POW_PLAN1_DIFFICULTY"`
+	PowPlan2Difficulty  int           `yaml:"pow_plan2_difficulty" env:"POW_PLAN2_DIFFICULTY"`
+	PowPlan3Difficulty  int           `yaml:"pow_plan3_difficulty" env:"POW_PLAN3_DIFFICULTY"`
+	PowPlan1RPM         int           `yaml:"pow_plan1_rpm" env:"POW_PLAN1_RPM"`
+	PowPlan2RPM         int           `yaml:"pow_plan2_rpm" env:"POW_PLAN2_RPM"`
+	PowPlan3RPM         int           `yaml:"pow_plan3_rpm" env:"POW_PLAN3_RPM"`
+	PowBurstRPS         int           `yaml:"pow_burst_rps" env:"POW_BURST_RPS"`
+	PowBurstCooldown    time.Duration `yaml:"pow_burst_cooldown" env:"POW_BURST_COOLDOWN"`
+	PowChallengePerMin  int           `yaml:"pow_challenge_per_min" env:"POW_CHALLENGE_RATE_PER_MIN"`
+	PowChallengePerDay  int           `yaml:"pow_challenge_per_day" env:"POW_CHALLENGE_RATE_PER_DAY"`
+	PowAdjustInterval   time.Duration `yaml:"pow_adjust_interval" env:"POW_ADJUST_INTERVAL"`
 	VPNImage            string        `yaml:"vpn_image" env:"VPN_IMAGE"`
 	CooldownDuration    time.Duration `yaml:"cooldown_duration" env:"RATE_LIMIT_COOLDOWN"`
 	HealthCheckPeriod   time.Duration `yaml:"health_check_period" env:"HEALTH_CHECK_PERIOD"`
@@ -88,22 +88,22 @@ type Config struct {
 	ResourceMemoryLimit string        `yaml:"resource_memory_limit" env:"RESOURCE_MEMORY_LIMIT"`
 
 	// ProtonVPN configuration
-	ProtonVPNUsername  string `yaml:"protonvpn_username" env:"PROTONVPN_USERNAME"`
-	ProtonVPNPassword  string `yaml:"protonvpn_password" env:"PROTONVPN_PASSWORD"`
-	ProtonVPNAPIBase   string `yaml:"protonvpn_api_base" env:"PROTONVPN_API_BASE"`
+	ProtonVPNUsername   string `yaml:"protonvpn_username" env:"PROTONVPN_USERNAME"`
+	ProtonVPNPassword   string `yaml:"protonvpn_password" env:"PROTONVPN_PASSWORD"`
+	ProtonVPNAPIBase    string `yaml:"protonvpn_api_base" env:"PROTONVPN_API_BASE"`
 	ProtonVPNVpnAPIBase string `yaml:"protonvpn_vpn_api_base" env:"PROTONVPN_VPN_API_BASE"`
-	ProtonVPNStorePath string `yaml:"protonvpn_store_path" env:"PROTONVPN_STORE_PATH"`
-	ProtonVPNRegions   string `yaml:"protonvpn_regions" env:"PROTONVPN_REGIONS"`
+	ProtonVPNStorePath  string `yaml:"protonvpn_store_path" env:"PROTONVPN_STORE_PATH"`
+	ProtonVPNRegions    string `yaml:"protonvpn_regions" env:"PROTONVPN_REGIONS"`
 	ProtonVPNIPCheckURL string `yaml:"protonvpn_ip_check_url" env:"PROTONVPN_IP_CHECK_URL"`
 
 	// Retry configuration
-	MaxRetries         int           `yaml:"max_retries" env:"MAX_RETRIES"`
-	RetryBaseDelay     time.Duration `yaml:"retry_base_delay" env:"RETRY_BASE_DELAY"`
-	RetryMaxDelay      time.Duration `yaml:"retry_max_delay" env:"RETRY_MAX_DELAY"`
+	MaxRetries     int           `yaml:"max_retries" env:"MAX_RETRIES"`
+	RetryBaseDelay time.Duration `yaml:"retry_base_delay" env:"RETRY_BASE_DELAY"`
+	RetryMaxDelay  time.Duration `yaml:"retry_max_delay" env:"RETRY_MAX_DELAY"`
 
 	// Retry-After (seconds) sent to clients when the upstream keeps rate
 	// limiting us across all retries
-	RateLimitRetryAfter string        `yaml:"rate_limit_retry_after" env:"RATE_LIMIT_RETRY_AFTER"`
+	RateLimitRetryAfter string `yaml:"rate_limit_retry_after" env:"RATE_LIMIT_RETRY_AFTER"`
 
 	// How long an egress IP stays banned after an upstream 429. During this
 	// window no request is routed through it and no new container may be
@@ -115,10 +115,10 @@ type Config struct {
 	RateLimitFreshIPWait time.Duration `yaml:"rate_limit_fresh_ip_wait" env:"RATE_LIMIT_FRESH_IP_WAIT"`
 
 	// Concurrency
-	MaxConcurrent      int `yaml:"max_concurrent" env:"MAX_CONCURRENT"`
+	MaxConcurrent int `yaml:"max_concurrent" env:"MAX_CONCURRENT"`
 
 	// Sticky session
-	StickySessionTTL   time.Duration `yaml:"sticky_session_ttl" env:"STICKY_SESSION_TTL"`
+	StickySessionTTL time.Duration `yaml:"sticky_session_ttl" env:"STICKY_SESSION_TTL"`
 
 	// CORS
 	CORSOrigin string `yaml:"cors_origin" env:"CORS_ORIGIN"`
@@ -155,13 +155,13 @@ type Config struct {
 	// web_search function injected; when the model calls it the gateway runs
 	// the search server-side (through the VPN proxy egress) and feeds results
 	// back for another round.
-	WebSearchEnabled     bool          `yaml:"web_search_enabled" env:"WEB_SEARCH_ENABLED"`
-	WebSearchMaxResults  int           `yaml:"web_search_max_results" env:"WEB_SEARCH_MAX_RESULTS"`
-	WebSearchMaxPages    int           `yaml:"web_search_max_pages" env:"WEB_SEARCH_MAX_PAGES"`
-	WebSearchMaxPageChar int           `yaml:"web_search_max_page_chars" env:"WEB_SEARCH_MAX_PAGE_CHARS"`
-	WebSearchMaxRounds   int           `yaml:"web_search_max_rounds" env:"WEB_SEARCH_MAX_ROUNDS"`
-	SearxngURL           string        `yaml:"searxng_url" env:"SEARXNG_URL"`
-	BraveAPIKey          string        `yaml:"brave_api_key" env:"BRAVE_API_KEY"`
+	WebSearchEnabled     bool   `yaml:"web_search_enabled" env:"WEB_SEARCH_ENABLED"`
+	WebSearchMaxResults  int    `yaml:"web_search_max_results" env:"WEB_SEARCH_MAX_RESULTS"`
+	WebSearchMaxPages    int    `yaml:"web_search_max_pages" env:"WEB_SEARCH_MAX_PAGES"`
+	WebSearchMaxPageChar int    `yaml:"web_search_max_page_chars" env:"WEB_SEARCH_MAX_PAGE_CHARS"`
+	WebSearchMaxRounds   int    `yaml:"web_search_max_rounds" env:"WEB_SEARCH_MAX_ROUNDS"`
+	SearxngURL           string `yaml:"searxng_url" env:"SEARXNG_URL"`
+	BraveAPIKey          string `yaml:"brave_api_key" env:"BRAVE_API_KEY"`
 
 	// Model list filter: only models whose name contains this substring are
 	// returned by /v1/models (case-insensitive). Empty string disables.
@@ -171,62 +171,62 @@ type Config struct {
 // DefaultConfig returns configuration with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
-		ListenAddr:          ":8082",
-		UpstreamBaseURL:     "https://opencode.ai/zen/v1",
-		UpstreamProvider:    "zen",
-		OpenCodeServerURL:   "http://127.0.0.1:4096",
+		ListenAddr:             ":8082",
+		UpstreamBaseURL:        "https://opencode.ai/zen/v1",
+		UpstreamProvider:       "zen",
+		OpenCodeServerURL:      "http://127.0.0.1:4096",
 		OpenCodeCLIProviderEnv: "ANTHROPIC_API_KEY",
-		ProxyPoolSize:       3,
-		ProxyBasePort:       10801,
-		ProxyIPRotateAttempts: 3,
-		PowEnabled:            false, // opt-in: set POW_ENABLED=true to gate /v1/*
-		PowStorePath:          "data/pow.db",
-		PowChallengeTTL:       10 * time.Minute,
-		PowKeyTTL:             7 * 24 * time.Hour,
-		PowBaseDifficulty:     24,
-		PowMinDifficulty:      20,
-		PowMaxDifficulty:      40,
-		PowPlan1Difficulty:    0,
-		PowPlan2Difficulty:    4,
-		PowPlan3Difficulty:    8,
-		PowPlan1RPM:           100,
-		PowPlan2RPM:           250,
-		PowPlan3RPM:           500,
-		PowBurstRPS:           5,
-		PowBurstCooldown:      5 * time.Minute,
-		PowChallengePerMin:    6,
-		PowChallengePerDay:    60,
-		PowAdjustInterval:     30 * time.Second,
-		VPNImage:            "ghcr.io/tprasadtp/protonwire:latest",
-		ProtonVPNAPIBase:    "https://account.protonvpn.com",
-		ProtonVPNVpnAPIBase: "https://vpn-api.proton.me",
-		ProtonVPNStorePath:  "data/protonvpn.db",
-		WebSearchEnabled:    true,
-		WebSearchMaxResults: 5,
-		WebSearchMaxPages:   2,
-		WebSearchMaxPageChar: 6000,
-		WebSearchMaxRounds:  3,
-		ProtonVPNRegions:    "NL,US,JP,DE",
-		ProtonVPNIPCheckURL: "https://icanhazip.com/",
-		CooldownDuration:    5 * time.Minute,
-		HealthCheckPeriod:   30 * time.Second,
-		ResourceCPULimit:    "0.25",
-		ResourceMemoryLimit: "512M",
-		MaxRetries:          3,
-		RetryBaseDelay:      1 * time.Second,
-		RetryMaxDelay:       30 * time.Second,
-		RateLimitRetryAfter: "60",
-		IPBanDuration:       10 * time.Minute,
-		RateLimitFreshIPWait: 90 * time.Second,
-		MaxConcurrent:       100,
-		StickySessionTTL:    10 * time.Minute,
-		CORSOrigin:          "*",
-		LogLevel:            "info",
-		LogFormat:           "json",
-		RequestTimeout:      60 * time.Second,
-		MetricsDBPath:       "data/metrics.db",
-		ModelFilter:         "-free",
-		ModelPricing:        "gpt-4o:2.50,10.00,1.25;gpt-4o-mini:0.15,0.60,0.075;gpt-4-turbo:10.00,30.00,5.00;gpt-3.5-turbo:0.50,1.50,0.25;claude-3-5-sonnet:3.00,15.00,1.50;claude-3-5-haiku:0.25,1.25,0.125",
+		ProxyPoolSize:          3,
+		ProxyBasePort:          10801,
+		ProxyIPRotateAttempts:  3,
+		PowEnabled:             false, // opt-in: set POW_ENABLED=true to gate /v1/*
+		PowStorePath:           "data/pow.db",
+		PowChallengeTTL:        10 * time.Minute,
+		PowKeyTTL:              7 * 24 * time.Hour,
+		PowBaseDifficulty:      24,
+		PowMinDifficulty:       20,
+		PowMaxDifficulty:       40,
+		PowPlan1Difficulty:     0,
+		PowPlan2Difficulty:     4,
+		PowPlan3Difficulty:     8,
+		PowPlan1RPM:            100,
+		PowPlan2RPM:            250,
+		PowPlan3RPM:            500,
+		PowBurstRPS:            5,
+		PowBurstCooldown:       5 * time.Minute,
+		PowChallengePerMin:     6,
+		PowChallengePerDay:     60,
+		PowAdjustInterval:      30 * time.Second,
+		VPNImage:               "ghcr.io/tprasadtp/protonwire:latest",
+		ProtonVPNAPIBase:       "https://account.protonvpn.com",
+		ProtonVPNVpnAPIBase:    "https://vpn-api.proton.me",
+		ProtonVPNStorePath:     "data/protonvpn.db",
+		WebSearchEnabled:       true,
+		WebSearchMaxResults:    5,
+		WebSearchMaxPages:      2,
+		WebSearchMaxPageChar:   6000,
+		WebSearchMaxRounds:     3,
+		ProtonVPNRegions:       "NL,US,JP,DE",
+		ProtonVPNIPCheckURL:    "https://icanhazip.com/",
+		CooldownDuration:       5 * time.Minute,
+		HealthCheckPeriod:      30 * time.Second,
+		ResourceCPULimit:       "0.25",
+		ResourceMemoryLimit:    "512M",
+		MaxRetries:             3,
+		RetryBaseDelay:         1 * time.Second,
+		RetryMaxDelay:          30 * time.Second,
+		RateLimitRetryAfter:    "60",
+		IPBanDuration:          10 * time.Minute,
+		RateLimitFreshIPWait:   90 * time.Second,
+		MaxConcurrent:          100,
+		StickySessionTTL:       10 * time.Minute,
+		CORSOrigin:             "*",
+		LogLevel:               "info",
+		LogFormat:              "json",
+		RequestTimeout:         60 * time.Second,
+		MetricsDBPath:          "data/metrics.db",
+		ModelFilter:            "-free",
+		ModelPricing:           "gpt-4o:2.50,10.00,1.25;gpt-4o-mini:0.15,0.60,0.075;gpt-4-turbo:10.00,30.00,5.00;gpt-3.5-turbo:0.50,1.50,0.25;claude-3-5-sonnet:3.00,15.00,1.50;claude-3-5-haiku:0.25,1.25,0.125",
 	}
 }
 

@@ -59,9 +59,9 @@ type ocPart struct {
 }
 
 type ocMessageRequest struct {
-	ProviderID string  `json:"providerID"`
-	ModelID    string  `json:"modelID,omitempty"`
-	Agent      string  `json:"agent,omitempty"`
+	ProviderID string   `json:"providerID"`
+	ModelID    string   `json:"modelID,omitempty"`
+	Agent      string   `json:"agent,omitempty"`
 	Parts      []ocPart `json:"parts"`
 }
 
@@ -77,9 +77,9 @@ type ocSessionResponse struct {
 // ocPartResult mirrors the relevant fields of an OpenCode Part returned by the
 // /session/:id/message endpoint.
 type ocPartResult struct {
-	Type      string `json:"type"`
-	Text      string `json:"text,omitempty"`
-	Error     *struct {
+	Type  string `json:"type"`
+	Text  string `json:"text,omitempty"`
+	Error *struct {
 		Name    string `json:"name"`
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -87,9 +87,9 @@ type ocPartResult struct {
 
 type ocMessageResponse struct {
 	Info struct {
-		ID        string `json:"id"`
-		Role      string `json:"role"`
-		Status    string `json:"status"`
+		ID     string `json:"id"`
+		Role   string `json:"role"`
+		Status string `json:"status"`
 	} `json:"info"`
 	Parts []ocPartResult `json:"parts"`
 }
@@ -100,10 +100,10 @@ type ocMessageResponse struct {
 
 // ocChoice / ocUsage are a small slice of the OpenAI chat response schema.
 type ocChoice struct {
-	Index   int      `json:"index"`
-	Delta   *ocDelta  `json:"delta,omitempty"`
+	Index   int        `json:"index"`
+	Delta   *ocDelta   `json:"delta,omitempty"`
 	Message *ocMessage `json:"message,omitempty"`
-	Finish  string   `json:"finish_reason,omitempty"`
+	Finish  string     `json:"finish_reason,omitempty"`
 }
 
 type ocDelta struct {
@@ -112,17 +112,17 @@ type ocDelta struct {
 }
 
 type ocMessage struct {
-	Role    string      `json:"role"`
-	Content string      `json:"content"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 type ocChatResponse struct {
-	ID      string         `json:"id"`
-	Object  string         `json:"object"`
-	Created int64          `json:"created"`
-	Model   string         `json:"model"`
-	Choices []ocChoice     `json:"choices"`
-	Usage   *Usage         `json:"usage,omitempty"`
+	ID      string     `json:"id"`
+	Object  string     `json:"object"`
+	Created int64      `json:"created"`
+	Model   string     `json:"model"`
+	Choices []ocChoice `json:"choices"`
+	Usage   *Usage     `json:"usage,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -449,7 +449,11 @@ type sseWriter struct {
 }
 
 func (s sseWriter) Write(p []byte) (int, error) { return s.w.Write(p) }
-func (s sseWriter) Flush()                        { if s.f != nil { s.f.Flush() } }
+func (s sseWriter) Flush() {
+	if s.f != nil {
+		s.f.Flush()
+	}
+}
 
 func (c *OpenCodeClient) doAdapt(ctx context.Context, p *proxypkg.Proxy, body []byte, auth Auth, stream bool) (*http.Response, *RateLimit, error) {
 	if stream {

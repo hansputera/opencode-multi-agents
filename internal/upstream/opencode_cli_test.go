@@ -31,7 +31,7 @@ func (m *cliExecManager) CreateEx(ctx context.Context, bannedRegions, avoidServe
 	return nil, nil
 }
 
-func (m *cliExecManager) Remove(ctx context.Context, id string) error         { return nil }
+func (m *cliExecManager) Remove(ctx context.Context, id string) error { return nil }
 func (m *cliExecManager) HealthCheck(ctx context.Context, p *proxypkg.Proxy) (bool, error) {
 	return true, nil
 }
@@ -56,9 +56,9 @@ func newCLIClient() (*OpenCodeCLIClient, *proxypkg.Proxy, *cliExecManager) {
 
 func chatBody(model, convID string, stream bool) []byte {
 	req := map[string]any{
-		"model":          model,
-		"stream":         stream,
-		"messages":       []map[string]any{{"role": "user", "content": "hello"}},
+		"model":           model,
+		"stream":          stream,
+		"messages":        []map[string]any{{"role": "user", "content": "hello"}},
 		"conversation_id": convID,
 	}
 	b, _ := json.Marshal(req)

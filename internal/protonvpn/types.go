@@ -58,18 +58,18 @@ type KeySalt struct {
 
 // CertificateResponse represents the response from /api/vpn/v1/certificate
 type CertificateResponse struct {
-	Code                int       `json:"Code"`
-	SerialNumber        string    `json:"SerialNumber"`
-	ClientKey           string    `json:"ClientKey"`
-	Certificate         string    `json:"Certificate"`
-	ExpirationTime      int64     `json:"ExpirationTime"`
-	RefreshTime         int64     `json:"RefreshTime"`
-	ServerPublicKey     string    `json:"ServerPublicKey"`
-	ServerPublicKeyMode string    `json:"ServerPublicKeyMode"`
-	IPv4                string    `json:"IPv4"`
-	IPv6                string    `json:"IPv6"`
-	DNS                 []string  `json:"DNS"`
-	Features            Features  `json:"Features"`
+	Code                int      `json:"Code"`
+	SerialNumber        string   `json:"SerialNumber"`
+	ClientKey           string   `json:"ClientKey"`
+	Certificate         string   `json:"Certificate"`
+	ExpirationTime      int64    `json:"ExpirationTime"`
+	RefreshTime         int64    `json:"RefreshTime"`
+	ServerPublicKey     string   `json:"ServerPublicKey"`
+	ServerPublicKeyMode string   `json:"ServerPublicKeyMode"`
+	IPv4                string   `json:"IPv4"`
+	IPv6                string   `json:"IPv6"`
+	DNS                 []string `json:"DNS"`
+	Features            Features `json:"Features"`
 }
 
 // ServerListResponse represents the response from /api/vpn/v2/logicals

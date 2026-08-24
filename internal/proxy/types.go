@@ -19,20 +19,20 @@ const (
 
 // Proxy represents a single VPN container proxy
 type Proxy struct {
-	ID           string       `json:"-"`
-	ContainerID  string       `json:"-"`
-	SOCKS5Addr   string       `json:"-"`
-	Port         int          `json:"port"`
-	State        ProxyState   `json:"state"`
-	LastUsed     time.Time    `json:"last_used"`
-	LastCheck    time.Time    `json:"last_check"`
-	RequestsSent int          `json:"requests_sent"`
-	ErrorCount   int          `json:"error_count"`
-	CreatedAt    time.Time    `json:"created_at"`
-	EgressIP     string       `json:"egress_ip"`
-	Region       string       `json:"region"`
-	ServerName   string       `json:"server_name"`
-	ServerIP     string       `json:"server_ip"`
+	ID           string     `json:"-"`
+	ContainerID  string     `json:"-"`
+	SOCKS5Addr   string     `json:"-"`
+	Port         int        `json:"port"`
+	State        ProxyState `json:"state"`
+	LastUsed     time.Time  `json:"last_used"`
+	LastCheck    time.Time  `json:"last_check"`
+	RequestsSent int        `json:"requests_sent"`
+	ErrorCount   int        `json:"error_count"`
+	CreatedAt    time.Time  `json:"created_at"`
+	EgressIP     string     `json:"egress_ip"`
+	Region       string     `json:"region"`
+	ServerName   string     `json:"server_name"`
+	ServerIP     string     `json:"server_ip"`
 
 	// manager is the container manager that created this proxy, used by
 	// ExecIn to docker-exec commands inside the container. Wired by the pool.
@@ -41,19 +41,19 @@ type Proxy struct {
 
 // ProxySnapshot is a sanitized view of Proxy safe for API responses.
 type ProxySnapshot struct {
-	ID           string       `json:"id"`
-	SOCKS5Addr   string       `json:"socks5_addr"`
-	Port         int          `json:"port"`
-	State        ProxyState   `json:"state"`
-	LastUsed     time.Time    `json:"last_used"`
-	LastCheck    time.Time    `json:"last_check"`
-	RequestsSent int          `json:"requests_sent"`
-	ErrorCount   int          `json:"error_count"`
-	CreatedAt    time.Time    `json:"created_at"`
-	EgressIP     string       `json:"egress_ip"`
-	Region       string       `json:"region"`
-	ServerName   string       `json:"server_name"`
-	ServerIP     string       `json:"server_ip"`
+	ID           string     `json:"id"`
+	SOCKS5Addr   string     `json:"socks5_addr"`
+	Port         int        `json:"port"`
+	State        ProxyState `json:"state"`
+	LastUsed     time.Time  `json:"last_used"`
+	LastCheck    time.Time  `json:"last_check"`
+	RequestsSent int        `json:"requests_sent"`
+	ErrorCount   int        `json:"error_count"`
+	CreatedAt    time.Time  `json:"created_at"`
+	EgressIP     string     `json:"egress_ip"`
+	Region       string     `json:"region"`
+	ServerName   string     `json:"server_name"`
+	ServerIP     string     `json:"server_ip"`
 }
 
 // Snapshot returns a sanitized copy safe for API responses.

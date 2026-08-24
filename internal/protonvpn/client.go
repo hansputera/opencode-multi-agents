@@ -19,14 +19,14 @@ import (
 
 // Client handles ProtonVPN API operations
 type Client struct {
-	store       *Store
-	auth        *SRPAuth
-	vpnAPIBase  string
-	httpClient  *http.Client
-	log         *zerolog.Logger
-	username    string
-	password    string
-	certMu      sync.Mutex // Serializes certificate creation to avoid key conflicts
+	store      *Store
+	auth       *SRPAuth
+	vpnAPIBase string
+	httpClient *http.Client
+	log        *zerolog.Logger
+	username   string
+	password   string
+	certMu     sync.Mutex // Serializes certificate creation to avoid key conflicts
 }
 
 // NewClient creates a new ProtonVPN client
