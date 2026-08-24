@@ -492,6 +492,13 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	var rateLimited bool
 	freshDeadline := time.Time{}
 
+	type relayedResponse struct {
+		status      int
+		body        []byte
+		contentType string
+	}
+	var lastUpstream *relayedResponse
+
 	for attempt := 0; attempt <= h.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
 			if rateLimited {
@@ -545,11 +552,51 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			lastErr = err
+			h.pool.MarkUnhealthy(proxy)
+			waitCtx, cancel := context.WithTimeout(ctx, h.cfg.RateLimitFreshIPWait)
+			np, gerr := h.pool.GetProxy(waitCtx, "")
+			cancel()
+			if gerr == nil && np != nil {
+				if proxy != nil {
+					h.pool.ReleaseProxy(proxy)
+				}
+				proxy = np
+			} else {
+				proxy = nil
+			}
+			continue
+		}
+
+		// Retry transient upstream server errors (see chat completions).
+		if resp.StatusCode >= http.StatusInternalServerError && attempt < h.cfg.MaxRetries {
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			resp.Body.Close()
+			lastUpstream = &relayedResponse{
+				status:      resp.StatusCode,
+				body:        bodyBytes,
+				contentType: resp.Header.Get("Content-Type"),
+			}
+			h.log.Warn().Int("status", resp.StatusCode).Int("attempt", attempt+1).Msg("Upstream server error on models, retrying")
 			continue
 		}
 
 		h.handleModelList(w, resp)
 		h.pool.ReleaseProxy(proxy)
+		return
+	}
+
+	// Retries exhausted with a remembered provider error: relay it verbatim.
+	if lastUpstream != nil {
+		if proxy != nil {
+			h.pool.ReleaseProxy(proxy)
+		}
+		if lastUpstream.contentType != "" {
+			w.Header().Set("Content-Type", lastUpstream.contentType)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(lastUpstream.status)
+		w.Write(lastUpstream.body)
 		return
 	}
 
@@ -840,6 +887,15 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	freshDeadline := time.Time{}
 	ownProxy := proxy
 
+	// relayable5xx remembers the last upstream 5xx response so that, if all
+	// retries fail, the client still gets the provider's own error verbatim.
+	type relayedResponse struct {
+		status      int
+		body        []byte
+		contentType string
+	}
+	var lastUpstream *relayedResponse
+
 	for attempt := 0; attempt <= h.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
 			if rateLimited {
@@ -901,6 +957,40 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 		if err != nil {
 			lastErr = err
+			// Transport failures usually mean THIS container's VPN tunnel
+			// died. Mark it unhealthy and retry on a different proxy rather
+			// than hammering the same dead tunnel.
+			h.pool.MarkUnhealthy(proxy)
+			waitCtx, cancel := context.WithTimeout(ctx, h.cfg.RateLimitFreshIPWait)
+			np, gerr := h.pool.GetProxy(waitCtx, req.ConversationID)
+			cancel()
+			if gerr == nil && np != nil {
+				h.pool.ReleaseProxy(ownProxy)
+				ownProxy = np
+				proxy = np
+			} else {
+				proxy = nil // nothing available; remaining attempts will fail fast
+			}
+			continue
+		}
+
+		// Retry transient server-side upstream failures (provider/model
+		// endpoint blips such as "Endpoint is unavailable"). Client errors
+		// (4xx) are never retried; rate limits were handled above. Once
+		// retries run out, the provider's error is relayed verbatim.
+		if resp.StatusCode >= http.StatusInternalServerError && attempt < h.cfg.MaxRetries {
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			resp.Body.Close()
+			lastUpstream = &relayedResponse{
+				status:      resp.StatusCode,
+				body:        bodyBytes,
+				contentType: resp.Header.Get("Content-Type"),
+			}
+			h.log.Warn().
+				Str("model", req.Model).
+				Int("status", resp.StatusCode).
+				Int("attempt", attempt+1).
+				Msg("Upstream server error, retrying")
 			continue
 		}
 
@@ -940,6 +1030,27 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			Str("model", req.Model).
 			Msg("Request rate limited by upstream, all fresh IPs exhausted")
 		record(false, http.StatusTooManyRequests, upstream.Usage{})
+		return
+	}
+
+	// All retries exhausted: if the last failure was an upstream 5xx,
+	// relay the provider's own error verbatim instead of a generic message —
+	// its text ("Endpoint is unavailable", "Model is unavailable", ...) is
+	// the most useful signal for choosing another model.
+	if lastUpstream != nil {
+		if lastUpstream.contentType != "" {
+			w.Header().Set("Content-Type", lastUpstream.contentType)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(lastUpstream.status)
+		w.Write(lastUpstream.body)
+		h.log.Warn().
+			Str("model", req.Model).
+			Int("status", lastUpstream.status).
+			Err(lastErr).
+			Msg("Upstream kept failing after retries; relaying provider error")
+		record(false, lastUpstream.status, upstream.Usage{})
 		return
 	}
 

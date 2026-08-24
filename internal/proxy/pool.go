@@ -563,20 +563,32 @@ func (pm *PoolManager) banIPLocked(ip string, until time.Time) {
 	}
 }
 
-// MarkUnhealthy marks a proxy as unhealthy
+// MarkUnhealthy marks a proxy as unhealthy (failed health check or a
+// transport failure mid-request — usually a dead VPN tunnel). Unhealthy
+// proxies are skipped by GetProxy immediately, and the pool is topped back
+// up with a replacement.
 func (pm *PoolManager) MarkUnhealthy(proxy *Proxy) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	if proxy == nil {
+		return
+	}
 
+	topUp := false
+	pm.mu.Lock()
 	if pr, exists := pm.pool[proxy.ID]; exists {
 		pr.State = StateUnhealthy
 		pr.ErrorCount++
 		pm.totalErrors.Add(1)
+		topUp = true
 
 		pm.log.Warn().
 			Str("proxy_id", pr.ID).
 			Int("error_count", pr.ErrorCount).
 			Msg("Proxy marked unhealthy")
+	}
+	pm.mu.Unlock()
+
+	if topUp {
+		pm.ensurePoolCapacity(context.Background())
 	}
 }
 
