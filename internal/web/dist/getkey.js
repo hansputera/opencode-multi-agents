@@ -17,14 +17,14 @@ const GetKeyView = {
       <div class="min-h-screen flex flex-col">
         <header class="border-b-[3px] border-ink bg-yellow px-6 py-4 flex items-center justify-between gap-4">
           <div class="flex items-center gap-3">
-            <a href="#/dashboard" class="flex items-center gap-2">
+            <a href="/dashboard" class="flex items-center gap-2">
               <div class="neo-card-flat bg-ink text-yellow font-black text-2xl w-12 h-12 flex items-center justify-center -rotate-3">⚡</div>
             </a>
             <h1 class="text-2xl font-black tracking-tight border-[3px] border-ink bg-cream px-4 py-1 -rotate-1 neo-card-flat shadow-[4px_4px_0_0_#1B1B1B]">Free API Key</h1>
           </div>
           <div class="flex items-center gap-2">
-            <a href="#/chat" class="neo-btn px-5 py-2 text-sm">💬 Chat</a>
-            <a href="#/dashboard" class="neo-btn px-5 py-2 text-sm">📊 Dashboard</a>
+            <a href="/chat" class="neo-btn px-5 py-2 text-sm">💬 Chat</a>
+            <a href="/dashboard" class="neo-btn px-5 py-2 text-sm">📊 Dashboard</a>
           </div>
         </header>
         <main class="flex-1 p-6 max-w-4xl w-full mx-auto space-y-6">
@@ -256,7 +256,7 @@ const GetKeyView = {
           <p class="text-sm font-bold">Plan: <span class="badge bg-purple">${esc(res.plan)}</span> · Rate: <b>${res.rpm} req/min</b> · Expires: ${new Date(res.expires_at * 1000).toLocaleDateString()}</p>
           <p class="text-xs font-semibold opacity-70">Saved in this browser and used automatically in Chat. Copy it somewhere safe — it cannot be recovered later.</p>
           <div class="flex gap-3 pt-1">
-            <a href="#/chat" class="neo-btn px-5 py-2 bg-blue text-white">💬 Start chatting</a>
+            <a href="/chat" class="neo-btn px-5 py-2 bg-blue text-white">💬 Start chatting</a>
             <button id="btn-again" class="neo-btn px-4 py-2 bg-white">Get another key</button>
           </div>
         </div>`;

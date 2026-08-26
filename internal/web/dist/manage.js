@@ -25,7 +25,7 @@ const ManageView = {
             <h1 class="text-xl font-black tracking-tight text-cream">POOL MANAGER</h1>
           </div>
           <div class="flex items-center gap-2">
-            <a href="#/dashboard" class="neo-btn-industrial muted sm">← DASHBOARD</a>
+            <a href="/dashboard" class="neo-btn-industrial muted sm">← DASHBOARD</a>
           </div>
         </header>
 

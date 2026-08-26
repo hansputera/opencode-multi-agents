@@ -25,7 +25,7 @@ const ChatView = {
       <div class="min-h-screen flex">
         <aside class="w-64 shrink-0 border-r-[3px] border-ink bg-yellow flex flex-col">
           <div class="p-4">
-            <a href="#/dashboard" class="flex items-center gap-2">
+            <a href="/dashboard" class="flex items-center gap-2">
               <div class="neo-card-flat bg-ink text-yellow font-black text-lg w-10 h-10 flex items-center justify-center -rotate-3">⚡</div>
               <span class="text-lg font-black tracking-tight">Neo Chat</span>
             </a>
@@ -48,8 +48,8 @@ const ChatView = {
             </div>
             <div class="flex items-center gap-2 shrink-0">
               <select id="model-select" class="neo-input px-3 py-1.5 text-sm font-bold max-w-[220px]"></select>
-              <a href="#/getkey" class="neo-btn px-3 py-1.5 text-sm bg-yellow">🔑</a>
-              <a href="#/dashboard" class="neo-btn px-3 py-1.5 text-sm bg-purple">📊</a>
+              <a href="/getkey" class="neo-btn px-3 py-1.5 text-sm bg-yellow">🔑</a>
+              <a href="/dashboard" class="neo-btn px-3 py-1.5 text-sm bg-purple">📊</a>
             </div>
           </header>
 

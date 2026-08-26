@@ -25,11 +25,11 @@ const DashboardView = {
           </div>
           <div class="flex items-center gap-3">
             <span id="health-pill" class="badge bg-cream">loading...</span>
-            <a href="#/getkey" class="neo-btn px-5 py-2 text-sm flex items-center gap-2">🔑 Key</a>
-            <a href="#/chat" class="neo-btn px-5 py-2 text-sm flex items-center gap-2">
+            <a href="/getkey" class="neo-btn px-5 py-2 text-sm flex items-center gap-2">🔑 Key</a>
+            <a href="/chat" class="neo-btn px-5 py-2 text-sm flex items-center gap-2">
               💬 Chat
             </a>
-            <a href="#/manage" class="neo-btn px-5 py-2 text-sm flex items-center gap-2">⚙ Manage</a>
+            <a href="/manage" class="neo-btn px-5 py-2 text-sm flex items-center gap-2">⚙ Manage</a>
           </div>
         </header>
 

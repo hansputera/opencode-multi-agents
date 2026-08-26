@@ -230,7 +230,7 @@ func (h *Handler) gatewayAuthMiddleware(next http.Handler) http.Handler {
 			// Legacy open mode: no keys configured anywhere.
 		default:
 			h.writeOpenAIError(w, http.StatusUnauthorized,
-				"Incorrect API key provided. Get a free key by solving a challenge at #/getkey.",
+				"Incorrect API key provided. Get a free key by solving a challenge at /getkey.",
 				"", "invalid_api_key")
 			return
 		}

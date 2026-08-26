@@ -3,17 +3,29 @@ const App = {
   current: null,
 
   init() {
-    window.addEventListener('hashchange', () => this.route());
+    window.addEventListener('popstate', () => this.route());
+    // Intercept same-origin link clicks for SPA navigation
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest('a[href]');
+      if (!a) return;
+      const url = new URL(a.href, location.origin);
+      if (url.origin !== location.origin) return; // external link
+      e.preventDefault();
+      if (url.pathname + url.search !== location.pathname + location.search) {
+        history.pushState(null, '', url.pathname + url.search);
+      }
+      this.route();
+    });
     this.route();
   },
 
   route() {
-    let hash = window.location.hash;
-    if (!hash) {
-      hash = '#/dashboard';
-      history.replaceState(null, '', hash);
+    let path = window.location.pathname;
+    if (!path || path === '/') {
+      path = '/dashboard';
+      history.replaceState(null, '', path);
     }
-    const name = hash.replace(/^#\/?/, '').split('?')[0] || 'dashboard';
+    const name = path.replace(/^\/?/, '').split('?')[0].split('/')[0] || 'dashboard';
     // Lazy view lookup: tolerate load-order differences between view files.
     const views = {};
     if (typeof ChatView !== 'undefined') views.chat = ChatView;
