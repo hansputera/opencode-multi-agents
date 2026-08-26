@@ -576,14 +576,8 @@ func (c *Config) Validate() error {
 	if c.ProxyBasePort < 1024 || c.ProxyBasePort > 65535 {
 		return fmt.Errorf("PROXY_BASE_PORT must be between 1024 and 65535")
 	}
-	if c.ProtonVPNSessionCookies == "" && c.ProtonVPNAccounts == "" {
-		if c.ProtonVPNUsername == "" {
-			return fmt.Errorf("PROTONVPN_USERNAME is required (or set PROTONVPN_SESSION_COOKIES / PROTONVPN_ACCOUNTS)")
-		}
-		if c.ProtonVPNPassword == "" {
-			return fmt.Errorf("PROTONVPN_PASSWORD is required (or set PROTONVPN_SESSION_COOKIES / PROTONVPN_ACCOUNTS)")
-		}
-	}
+	// ProtonVPN credentials are optional — accounts can be added via UI
+	// after startup using the ConfigStore.
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("MAX_RETRIES cannot be negative")
 	}

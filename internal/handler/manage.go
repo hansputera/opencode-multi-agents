@@ -233,6 +233,88 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Apply hot-reloadable settings to the live config pointer
+	if v, ok := req["upstream_base_url"]; ok && v != "" {
+		h.cfg.UpstreamBaseURL = v
+	}
+	if v, ok := req["upstream_provider"]; ok && v != "" {
+		h.cfg.UpstreamProvider = v
+	}
+	if v, ok := req["model_filter"]; ok {
+		h.cfg.ModelFilter = v
+	}
+	if v, ok := req["log_level"]; ok && v != "" {
+		h.cfg.LogLevel = v
+	}
+	if v, ok := req["log_format"]; ok && v != "" {
+		h.cfg.LogFormat = v
+	}
+	if v, ok := req["request_timeout"]; ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			h.cfg.RequestTimeout = d
+		}
+	}
+	if v, ok := req["max_retries"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 10 {
+			h.cfg.MaxRetries = n
+		}
+	}
+	if v, ok := req["max_concurrent"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			h.cfg.MaxConcurrent = n
+		}
+	}
+	if v, ok := req["cooldown_duration"]; ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			h.cfg.CooldownDuration = d
+		}
+	}
+	if v, ok := req["ip_ban_duration"]; ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			h.cfg.IPBanDuration = d
+		}
+	}
+	if v, ok := req["rate_limit_fresh_ip_wait"]; ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			h.cfg.RateLimitFreshIPWait = d
+		}
+	}
+	if v, ok := req["rate_limit_retry_after"]; ok && v != "" {
+		h.cfg.RateLimitRetryAfter = v
+	}
+	if v, ok := req["health_check_period"]; ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			h.cfg.HealthCheckPeriod = d
+		}
+	}
+	if v, ok := req["sticky_session_ttl"]; ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			h.cfg.StickySessionTTL = d
+		}
+	}
+	if v, ok := req["regions"]; ok {
+		h.cfg.ProtonVPNRegions = v
+	}
+	if v, ok := req["ip_check_url"]; ok {
+		h.cfg.ProtonVPNIPCheckURL = v
+	}
+	if v, ok := req["pow_enabled"]; ok {
+		h.cfg.PowEnabled = v == "true"
+	}
+	if v, ok := req["web_search_enabled"]; ok {
+		h.cfg.WebSearchEnabled = v == "true"
+	}
+	if v, ok := req["web_search_max_results"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			h.cfg.WebSearchMaxResults = n
+		}
+	}
+	if v, ok := req["web_search_max_rounds"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			h.cfg.WebSearchMaxRounds = n
+		}
+	}
+
 	settings, _ := h.cfgStore.GetSettings()
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"settings": settings})
 }

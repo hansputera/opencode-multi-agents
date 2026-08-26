@@ -65,7 +65,7 @@ const ChatView = {
                   <span id="chat-hint" class="text-[11px] font-bold opacity-50 hidden md:block">Enter to send · Shift+Enter for newline</span>
                   <div class="flex items-center gap-2">
                     <button id="btn-stop" class="neo-btn px-4 py-1.5 text-sm bg-red text-white hidden">⏹ Stop</button>
-                    <button id="btn-send" class="neo-btn px-5 py-1.5 text-sm bg-yellow">Send ➤</button>
+                    <button id="btn-send" class="neo-btn px-5 py-1.5 text-sm" style="background:#2563EB;color:white">Send ➤</button>
                   </div>
                 </div>
               </div>

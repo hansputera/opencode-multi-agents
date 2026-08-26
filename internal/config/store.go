@@ -312,16 +312,65 @@ func (s *ConfigStore) SeedFromConfig(cfg *Config) error {
 
 	// Seed key settings
 	settings := map[string]string{
+		// Upstream
+		"upstream_base_url":    cfg.UpstreamBaseURL,
+		"upstream_provider":    cfg.UpstreamProvider,
+		"model_filter":         cfg.ModelFilter,
+		// Pool
 		"pool_size":            fmt.Sprintf("%d", cfg.ProxyPoolSize),
+		"proxy_base_port":      fmt.Sprintf("%d", cfg.ProxyBasePort),
+		"max_concurrent":       fmt.Sprintf("%d", cfg.MaxConcurrent),
+		"vpn_image":            cfg.VPNImage,
+		// ProtonVPN
 		"regions":              cfg.ProtonVPNRegions,
 		"ip_check_url":         cfg.ProtonVPNIPCheckURL,
-		"cooldown_duration":    cfg.CooldownDuration.String(),
-		"ip_ban_duration":      cfg.IPBanDuration.String(),
+		"protonvpn_api_base":   cfg.ProtonVPNAPIBase,
+		// Rate limits
+		"cooldown_duration":       cfg.CooldownDuration.String(),
+		"ip_ban_duration":         cfg.IPBanDuration.String(),
+		"rate_limit_retry_after":  cfg.RateLimitRetryAfter,
+		"rate_limit_fresh_ip_wait": cfg.RateLimitFreshIPWait.String(),
+		// Retry
+		"max_retries":          fmt.Sprintf("%d", cfg.MaxRetries),
+		"retry_base_delay":     cfg.RetryBaseDelay.String(),
+		"retry_max_delay":      cfg.RetryMaxDelay.String(),
+		// Health
 		"health_check_period":  cfg.HealthCheckPeriod.String(),
+		// Resources
 		"resource_cpu_limit":   cfg.ResourceCPULimit,
 		"resource_memory_limit": cfg.ResourceMemoryLimit,
-		"max_retries":          fmt.Sprintf("%d", cfg.MaxRetries),
+		// Request
 		"request_timeout":      cfg.RequestTimeout.String(),
+		// Sticky session
+		"sticky_session_ttl":   cfg.StickySessionTTL.String(),
+		// Logging
+		"log_level":            cfg.LogLevel,
+		"log_format":           cfg.LogFormat,
+		// CORS
+		"cors_origin":          cfg.CORSOrigin,
+		// PoW
+		"pow_enabled":          fmt.Sprintf("%v", cfg.PowEnabled),
+		"pow_base_difficulty":  fmt.Sprintf("%d", cfg.PowBaseDifficulty),
+		"pow_min_difficulty":   fmt.Sprintf("%d", cfg.PowMinDifficulty),
+		"pow_max_difficulty":   fmt.Sprintf("%d", cfg.PowMaxDifficulty),
+		"pow_plan1_difficulty": fmt.Sprintf("%d", cfg.PowPlan1Difficulty),
+		"pow_plan2_difficulty": fmt.Sprintf("%d", cfg.PowPlan2Difficulty),
+		"pow_plan3_difficulty": fmt.Sprintf("%d", cfg.PowPlan3Difficulty),
+		"pow_plan1_rpm":        fmt.Sprintf("%d", cfg.PowPlan1RPM),
+		"pow_plan2_rpm":        fmt.Sprintf("%d", cfg.PowPlan2RPM),
+		"pow_plan3_rpm":        fmt.Sprintf("%d", cfg.PowPlan3RPM),
+		"pow_burst_rps":        fmt.Sprintf("%d", cfg.PowBurstRPS),
+		"pow_burst_cooldown":   cfg.PowBurstCooldown.String(),
+		"pow_challenge_per_min": fmt.Sprintf("%d", cfg.PowChallengePerMin),
+		"pow_challenge_per_day": fmt.Sprintf("%d", cfg.PowChallengePerDay),
+		"pow_key_ttl":          cfg.PowKeyTTL.String(),
+		// Web search
+		"web_search_enabled":      fmt.Sprintf("%v", cfg.WebSearchEnabled),
+		"web_search_max_results":  fmt.Sprintf("%d", cfg.WebSearchMaxResults),
+		"web_search_max_pages":    fmt.Sprintf("%d", cfg.WebSearchMaxPages),
+		"web_search_max_page_chars": fmt.Sprintf("%d", cfg.WebSearchMaxPageChar),
+		"web_search_max_rounds":   fmt.Sprintf("%d", cfg.WebSearchMaxRounds),
+		"searxng_url":             cfg.SearxngURL,
 	}
 	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
 	if err != nil {
