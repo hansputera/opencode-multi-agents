@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pool Manager — Neo Gateway</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            cream: '#FFFDF2',
+            ink: '#1B1B1B',
+            yellow: '#FFD43B',
+            pink: '#FF90E8',
+            blue: '#4D96FF',
+            purple: '#C3A6FF',
+            green: '#B1F1CB',
+            red: '#FF6B6B',
+            orange: '#FFA24C',
+            teal: '#4ED9C4',
+            lime: '#C8F169',
+          },
+          fontFamily: {
+            display: ['"Space Grotesk"', 'system-ui', 'sans-serif'],
+          },
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    body { font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif; background: var(--cream); color: var(--ink); margin: 0; }
+  </style>
+</head>
+<body>
+  <div id="view"></div>
+
+  <!-- Standalone helpers — no SPA router loaded -->
+  <script>
+    async function api(path, options = {}) {
+      try {
+        const res = await fetch(path, options);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const msg = data.error && data.error.message ? data.error.message : `HTTP ${res.status}`;
+          throw new Error(msg);
+        }
+        return data;
+      } catch (err) {
+        console.error('API error ' + path + ':', err);
+        throw err;
+      }
+    }
+  </script>
+  <script src="/manage.js"></script>
+  <script>
+    // Boot directly — no SPA router
+    ManageView.render(document.getElementById('view'));
+  </script>
+</body>
+</html>

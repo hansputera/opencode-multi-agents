@@ -17,6 +17,14 @@ func IndexHTML() []byte {
 	return data
 }
 
+// ManageHTML returns the embedded manage.html content.
+// This is a standalone page with no SPA scripts — fully server-isolated.
+func ManageHTML() []byte {
+	sub, _ := fs.Sub(dist, "dist")
+	data, _ := fs.ReadFile(sub, "manage.html")
+	return data
+}
+
 // Handler returns an http.Handler serving the embedded web UI.
 // Static assets are served with Cache-Control: no-cache so browsers
 // revalidate (304) instead of heuristically caching stale JS/CSS after

@@ -168,13 +168,12 @@ func (h *Handler) handleV1Fallback(w http.ResponseWriter, r *http.Request) {
 		"", "unknown_url")
 }
 
-// handleSPA serves index.html for explicit SPA routes (/manage).
-// This ensures SSR-managed pages always get a full HTML document on direct
-// navigation, bypassing the SPA intercept in app.js.
+// handleSPA serves standalone manage.html for /manage routes.
+// This page has no SPA scripts — fully isolated from client-side routing.
 func (h *Handler) handleSPA(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(web.IndexHTML())
+	w.Write(web.ManageHTML())
 }
 
 // keyIdentity describes a resolved API key.
