@@ -490,6 +490,15 @@ const ManageView = {
     this.renderPool();
   },
 
+  async refreshPool() {
+    const btn = document.getElementById('btn-refresh-pool');
+    if (btn) { btn.textContent = '↻ REFRESHING…'; btn.disabled = true; }
+    try {
+      this.pool = await api('/api/manage/pool/refresh', { method: 'POST' });
+    } catch (e) { /* keep existing pool data */ }
+    this.renderPool();
+  },
+
   renderPool() {
     const el = document.getElementById('manage-content');
     if (!this.pool) {
@@ -527,11 +536,12 @@ const ManageView = {
     el.innerHTML = `
       <div class="neo-panel-header">
         <span>LIVE POOL // ${stats.total || 0} PROXIES</span>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;align-items:center">
           <span class="neo-badge bg-green">Active: ${stats.active || 0}</span>
           <span class="neo-badge bg-yellow text-ink">Idle: ${stats.idle || 0}</span>
           <span class="neo-badge bg-orange">Cooldown: ${stats.cooldown || 0}</span>
           <span class="neo-badge bg-red text-white">Unhealthy: ${stats.unhealthy || 0}</span>
+          <button onclick="ManageView.refreshPool()" class="neo-btn-industrial sm muted" id="btn-refresh-pool">↻ REFRESH</button>
         </div>
       </div>
       <div style="overflow-x:auto">

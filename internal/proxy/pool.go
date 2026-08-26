@@ -662,6 +662,31 @@ func (pm *PoolManager) AddVPNContainer(ctx context.Context) error {
 	return pm.createProxy(ctx)
 }
 
+// RefreshPool reloads external proxies from the ConfigStore and ensures
+// the VPN pool is at capacity. Call this after adding accounts or proxies
+// via the management UI to pick them up without a restart.
+func (pm *PoolManager) RefreshPool(ctx context.Context, proxies []string) {
+	// Add any external proxies not yet in the pool
+	pm.mu.RLock()
+	existing := make(map[string]bool, len(pm.pool))
+	for _, p := range pm.pool {
+		existing[p.ID] = true
+	}
+	pm.mu.RUnlock()
+
+	for _, addr := range proxies {
+		if addr == "" {
+			continue
+		}
+		pm.AddExternalProxy(ctx, addr)
+	}
+
+	// Ensure VPN pool is at capacity
+	pm.ensurePoolCapacity(ctx)
+
+	pm.log.Info().Int("external_addrs", len(proxies)).Msg("Pool refresh triggered")
+}
+
 // Stats returns current pool statistics
 func (pm *PoolManager) Stats() PoolStats {
 	pm.mu.RLock()

@@ -335,6 +335,40 @@ func (h *Handler) handleGetPool(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- Pool Refresh ---
+
+func (h *Handler) handleRefreshPool(w http.ResponseWriter, r *http.Request) {
+	// Collect external proxy addresses from ConfigStore
+	proxyCfgs, err := h.cfgStore.GetProxies()
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to load proxies from config")
+		return
+	}
+	var addrs []string
+	for _, p := range proxyCfgs {
+		if p.Enabled {
+			addrs = append(addrs, p.Address)
+		}
+	}
+
+	// Trigger pool refresh: add external proxies + ensure VPN capacity
+	h.pool.RefreshPool(r.Context(), addrs)
+
+	// Return updated pool state
+	stats := h.pool.Stats()
+	proxies := h.pool.List()
+	snapshots := make([]interface{}, len(proxies))
+	for i, p := range proxies {
+		snapshots[i] = p.Snapshot()
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "refreshed",
+		"stats":   stats,
+		"proxies": snapshots,
+		"time":    time.Now().Format(time.RFC3339),
+	})
+}
+
 // --- helpers ---
 
 func parseID(r *http.Request, param string) (int64, error) {
