@@ -110,6 +110,17 @@ Rate limits alone don't punish abuse — they just slow it. So issued keys have 
 | PoW instead of signup for free keys | Email/invite gating | Zero PII, zero ops; cost lands on the abuser's electricity bill |
 | Punitive burst cooldown vs plain rate limit | Higher bucket only | Limits throttle revenue-free traffic; cooldowns make bursts unprofitable |
 | Round-robin dispatch over random map order | Random selection | Even container wear and predictable per-proxy load |
+| ConfigStore (SQLite) as single source of truth after first boot | .env on every restart | Credentials and settings survive restarts without re-seeding; UI changes take effect immediately |
+
+## ConfigStore & Runtime Settings
+
+The gateway uses a `ConfigStore` (`data/config.db`) to manage all configuration at runtime:
+
+- **First boot**: `.env` values are seeded into the ConfigStore (accounts, proxies, and all settings). This is a one-time migration — subsequent restarts ignore `.env` for these values.
+- **After first boot**: the ConfigStore is authoritative. All changes made via the Pool Manager UI (`#/manage`) are written to SQLite and survive restarts.
+- **Hot-reload**: fields marked ⚡ in the Settings UI (pool size, timeouts, rate limits, log level, PoW toggle, web search settings) are applied to the live config pointer immediately on save — no restart needed.
+- **Cold settings**: fields like VPN image, upstream base URL, and resource limits require a restart to take effect (saved for next boot).
+- **Credential isolation**: ProtonVPN accounts and external proxies have dedicated CRUD endpoints and are stored in dedicated tables, not in the settings key-value store.
 
 ---
 

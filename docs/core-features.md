@@ -166,7 +166,7 @@ Full protocol and solver details: [pow-api-keys.md](pow-api-keys.md).
 - Prometheus: `opencode_endpoint_requests_total{route,status}`, `opencode_bytes_served_total{route}`
 
 
-## 12. Web Dashboard & Chat UI
+## 12. Web Dashboard, Chat UI & Pool Manager
 
 **Dashboard** (`#/dashboard`): neobrutalism-styled, auto-refreshes every 5s:
 
@@ -180,6 +180,13 @@ Full protocol and solver details: [pow-api-keys.md](pow-api-keys.md).
 **Get Key** (`#/getkey`): plan picker → heat/power warning → live PoW solver (see section 8) → issued key stored in localStorage and used automatically by Chat.
 
 **Chat** (`#/chat`): ChatGPT-like interface — model picker, SSE streaming with reasoning display, multi-conversation sidebar backed by localStorage, automatic `conversation_id` sticky-session wiring.
+
+**Pool Manager** (`#/manage`): industrial neobrutalism-styled control panel with four tabs:
+
+- **Accounts**: CRUD for ProtonVPN accounts (username/password or browser cookies). Accounts are stored in `data/config.db` and can be added without touching `.env` or restarting.
+- **Proxies**: CRUD for external SOCKS5 proxies. New proxies are added to the live pool immediately.
+- **Settings**: all `.env` configuration exposed as grouped panels (Upstream, Pool, ProtonVPN, Rate Limits, Retry, Health, Resources, Logging, PoW, Web Search). Fields marked ⚡ are hot-reloadable — changes apply to the live config pointer immediately. All settings persist to SQLite and survive restarts; `.env` values are only used for first-boot seeding.
+- **Live Pool**: real-time proxy table with state, egress IP, SOCKS5 address, and request/error counts.
 
 ## 13. Observability
 
@@ -205,7 +212,7 @@ In all modes every request egresses through a per-container VPN IP with automati
 - Optional PoW key gate on `/v1/*`; issued keys stored hashed, 7-day expiry, burst-cooldown abuse guard.
 - Containers run non-root in production images; pinned Alpine base; Docker HEALTHCHECK.
 - Client-facing errors are sanitized; request bodies capped at 10MB; configurable CORS.
-- ProtonVPN credentials live only in `.env`/SQLite on your host; they are never logged or returned by any API.
+- ProtonVPN credentials can be managed via the Pool Manager UI (`#/manage`) or `.env` — they are never logged or returned by any API. `.env` is only read on first boot; after that the ConfigStore (SQLite) is authoritative.
 - SOCKS5 ports bind to `127.0.0.1` only — VPN exits are not reachable from the network.
 
 ---

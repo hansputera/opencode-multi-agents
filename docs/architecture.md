@@ -33,7 +33,7 @@ Technical deep dive: components, request lifecycle, container lifecycle, data mo
 |---|---|
 | `cmd/gateway` | Entry point: config load, logger, store init, pool start, HTTP server, graceful shutdown |
 | `cmd/powsolver` | Native multi-core BLAKE3 CLI client for the PoW key gate |
-| `internal/config` | Env + YAML config, defaults, validation |
+| `internal/config` | Env + YAML config, defaults, validation, ConfigStore (SQLite `data/config.db` for accounts, proxies, settings) |
 | `internal/handler` | HTTP routing (`/v1/*`, `/api/pow/*`, `/api/metrics`, ...), auth middleware (env ∪ issued keys + per-key limits), web-search tool rounds |
 | `internal/upstream` | Provider drivers (`zen`, `opencode`, `opencode-cli`), SOCKS5 HTTP transport, retry logic |
 | `internal/proxy` | Pool manager (state machine, region/IP bans, round-robin dispatch, duplicate-IP rotation), Docker manager (container lifecycle) |
@@ -119,6 +119,18 @@ server_cache   — fetched logical-server list
 wireguard_keys — derived X25519 keypair
 ed25519_keys   — certificate key pair
 ```
+
+### SQLite: config.db (`internal/config`)
+
+```
+accounts(id, username, password, store_path, session_cookies, enabled, created_at)
+proxies(id, address, enabled, created_at)
+settings(key TEXT PRIMARY KEY, value TEXT)
+```
+
+- `accounts`: ProtonVPN credentials managed via the Pool Manager UI (`#/manage`) or seeded from `.env` on first boot.
+- `proxies`: external SOCKS5 proxy addresses managed via UI.
+- `settings`: all `.env` configuration as key-value pairs. Seeded from `.env` on first boot; after that the ConfigStore is authoritative. Hot-reloadable fields are applied to the live config pointer immediately on save.
 
 ## Concurrency Model
 

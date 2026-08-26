@@ -11,7 +11,16 @@ ProtonVPN's modern clients don't use static config files — they:
 3. Ask ProtonVPN's API to issue a *certificate* binding the public key to a chosen server,
 4. Build a WireGuard tunnel from the certificate contents.
 
-The gateway replicates exactly this flow, which means fully automated credential handling: you only supply your ProtonVPN username/password.
+The gateway replicates exactly this flow, which means fully automated credential handling: you supply your ProtonVPN username/password either in `.env` (first-boot seed) or via the Pool Manager UI (`#/manage` → Accounts tab).
+
+## Credential Management
+
+ProtonVPN credentials are managed through the ConfigStore (`data/config.db`):
+
+- **`.env` method**: set `PROTONVPN_USERNAME`/`PROTONVPN_PASSWORD` (single account) or `PROTONVPN_ACCOUNTS` (multi-account `user:pass,user:pass`). These are seeded into the ConfigStore on first boot only.
+- **UI method**: add accounts via `#/manage` → Accounts tab. Supports username+password and browser cookie authentication. Each account gets its own isolated SQLite store (`data/protonvpn_N.db`).
+- **Cookie auth**: paste `PROTONVPN_SESSION_COOKIES` via `.env` or the UI. When cookies are set, SRP login is skipped entirely.
+- The ConfigStore is authoritative after first boot — `.env` values are ignored for existing accounts.
 
 ## Step 1 — SRP Authentication (`internal/protonvpn/auth.go`)
 
@@ -115,3 +124,5 @@ Container hardening/runtime: privileged + `NET_ADMIN` (WireGuard interface + sys
 ## Persistence Schema
 
 SQLite at `PROTONVPN_STORE_PATH`: `credentials`, `session`, `certificates`, `server_cache`, `wireguard_keys`, `ed25519_keys`. Everything survives restarts; credentials are never logged or exposed through any API.
+
+Additionally, `data/config.db` stores account records (username, password, store_path, session_cookies, enabled) and all gateway settings. Accounts are managed via the Pool Manager UI (`#/manage`) or seeded from `.env` on first boot.

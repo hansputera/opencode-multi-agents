@@ -11,6 +11,7 @@ A single Go binary that sits between your AI client (anything that speaks the Op
 - Free API keys are earned by solving a **proof-of-work challenge** (three effort tiers unlock higher rate limits).
 - A built-in **web_search tool** gives models live internet data through the same rotating IPs.
 - A web dashboard shows live traffic per endpoint, token usage, estimated costs, system specifications, and per-proxy egress IPs.
+- All configuration — including ProtonVPN accounts, external proxies, and every `.env` setting — is manageable via the **Pool Manager UI** at `#/manage`.
 
 ## Document Map
 
@@ -33,10 +34,12 @@ Your Client ──▶ Gateway (:8082) ──▶ SOCKS5 ──▶ VPN Container �
    │                ├─ 429 detected? → ban IP/region → new container on different server → retry
    │                └─ every request logged: route, status, latency, bytes (SQLite + Prometheus)
    │
-   └─ dashboard: per-endpoint traffic · tokens · costs · system specs · proxy pool
+   ├─ dashboard: per-endpoint traffic · tokens · costs · system specs · proxy pool
+   └─ manage: ProtonVPN accounts · external proxies · all settings (hot-reloadable)
 ```
 
 ## Quick Links
 
 - Setup & configuration: see the main [README](../README.md)
+- Pool Manager UI: `#/manage` — manage accounts, proxies, and all settings at runtime
 - Original integration plan: [PLANS/PROTONVPN-INTEGRATION.md](../PLANS/PROTONVPN-INTEGRATION.md)
