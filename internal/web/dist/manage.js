@@ -492,10 +492,14 @@ const ManageView = {
 
   async refreshPool() {
     const btn = document.getElementById('btn-refresh-pool');
-    if (btn) { btn.textContent = '↻ REFRESHING…'; btn.disabled = true; }
+    if (btn) { btn.textContent = '↻ CHECKING…'; btn.disabled = true; }
     try {
-      this.pool = await api('/api/manage/pool/refresh', { method: 'POST' });
-    } catch (e) { /* keep existing pool data */ }
+      const res = await api('/api/manage/pool/refresh', { method: 'POST' });
+      this.pool = res;
+      if (res.failed && res.failed.length > 0) {
+        alert('Health check failed for:\n' + res.failed.join('\n'));
+      }
+    } catch (e) { alert('Refresh failed: ' + e.message); }
     this.renderPool();
   },
 

@@ -176,12 +176,17 @@ func (h *Handler) handleCreateProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add to live pool
+	// Add to live pool (health check required)
 	ctx := r.Context()
-	if _, err := h.pool.AddExternalProxy(ctx, proxyCfg.Address); err != nil {
-		h.log.Warn().Err(err).Str("addr", proxyCfg.Address).Msg("Proxy saved but failed to add to live pool")
+	p, err := h.pool.AddExternalProxy(ctx, proxyCfg.Address)
+	if err != nil {
+		// Health check failed — remove from ConfigStore and return error
+		h.cfgStore.DeleteProxy(proxyCfg.ID)
+		h.writeError(w, http.StatusBadRequest, "proxy failed health check: "+err.Error())
+		return
 	}
 
+	_ = p // proxy added successfully
 	h.writeJSON(w, http.StatusCreated, proxyCfg)
 }
 
@@ -352,7 +357,8 @@ func (h *Handler) handleRefreshPool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Trigger pool refresh: add external proxies + ensure VPN capacity
-	h.pool.RefreshPool(r.Context(), addrs)
+	// Returns addresses that failed health checks
+	failed := h.pool.RefreshPool(r.Context(), addrs)
 
 	// Return updated pool state
 	stats := h.pool.Stats()
@@ -363,6 +369,7 @@ func (h *Handler) handleRefreshPool(w http.ResponseWriter, r *http.Request) {
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "refreshed",
+		"failed":  failed,
 		"stats":   stats,
 		"proxies": snapshots,
 		"time":    time.Now().Format(time.RFC3339),

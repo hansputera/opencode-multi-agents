@@ -621,9 +621,14 @@ func (pm *PoolManager) AddExternalProxy(ctx context.Context, addr string) (*Prox
 		return nil, fmt.Errorf("failed to create external proxy: %w", err)
 	}
 
-	// Health check to get egress IP
-	if ok, err := extMgr.HealthCheck(ctx, p); err != nil || !ok {
-		pm.log.Warn().Err(err).Str("addr", addr).Msg("External proxy health check failed, adding anyway")
+	// Health check must pass before adding to pool
+	ok, err := extMgr.HealthCheck(ctx, p)
+	if err != nil || !ok {
+		extMgr.Close()
+		if err != nil {
+			return nil, fmt.Errorf("health check failed for %s: %w", addr, err)
+		}
+		return nil, fmt.Errorf("health check failed for %s: proxy is unreachable", addr)
 	}
 
 	p.SetManager(extMgr)
@@ -638,7 +643,7 @@ func (pm *PoolManager) AddExternalProxy(ctx context.Context, addr string) (*Prox
 	default:
 	}
 
-	pm.log.Info().Str("id", p.ID).Str("addr", addr).Str("ip", p.EgressIP).Msg("Added external proxy")
+	pm.log.Info().Str("id", p.ID).Str("addr", addr).Str("ip", p.EgressIP).Msg("Added external proxy (healthy)")
 	return p, nil
 }
 
@@ -665,26 +670,25 @@ func (pm *PoolManager) AddVPNContainer(ctx context.Context) error {
 // RefreshPool reloads external proxies from the ConfigStore and ensures
 // the VPN pool is at capacity. Call this after adding accounts or proxies
 // via the management UI to pick them up without a restart.
-func (pm *PoolManager) RefreshPool(ctx context.Context, proxies []string) {
-	// Add any external proxies not yet in the pool
-	pm.mu.RLock()
-	existing := make(map[string]bool, len(pm.pool))
-	for _, p := range pm.pool {
-		existing[p.ID] = true
-	}
-	pm.mu.RUnlock()
+// Returns a list of addresses that failed health checks.
+func (pm *PoolManager) RefreshPool(ctx context.Context, proxies []string) []string {
+	var failed []string
 
 	for _, addr := range proxies {
 		if addr == "" {
 			continue
 		}
-		pm.AddExternalProxy(ctx, addr)
+		if _, err := pm.AddExternalProxy(ctx, addr); err != nil {
+			pm.log.Warn().Err(err).Str("addr", addr).Msg("External proxy failed health check during refresh")
+			failed = append(failed, addr+": "+err.Error())
+		}
 	}
 
 	// Ensure VPN pool is at capacity
 	pm.ensurePoolCapacity(ctx)
 
-	pm.log.Info().Int("external_addrs", len(proxies)).Msg("Pool refresh triggered")
+	pm.log.Info().Int("external_addrs", len(proxies)).Int("failed", len(failed)).Msg("Pool refresh triggered")
+	return failed
 }
 
 // Stats returns current pool statistics
