@@ -29,6 +29,7 @@ const DashboardView = {
             <a href="#/chat" class="neo-btn px-5 py-2 text-sm flex items-center gap-2">
               💬 Chat
             </a>
+            <a href="#/manage" class="neo-btn px-5 py-2 text-sm flex items-center gap-2">⚙ Manage</a>
           </div>
         </header>
 

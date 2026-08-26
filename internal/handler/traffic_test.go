@@ -76,7 +76,7 @@ func TestTrafficRecordedAcrossEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	h := newHandler(cfg, pool, store, log)
+	h := newHandler(cfg, nil, pool, store, log)
 	srv := httptest.NewServer(h.loggingMiddleware(h.requestIDMiddleware(h.corsMiddleware(h.gatewayAuthMiddleware(h.mux)))))
 	defer srv.Close()
 

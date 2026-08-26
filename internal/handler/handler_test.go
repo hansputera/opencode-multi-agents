@@ -207,7 +207,7 @@ func TestHandleModelsEndToEnd(t *testing.T) {
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
 
-	h := New(cfg, pool, nil, log)
+	h := New(cfg, nil, pool, nil, log)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -270,7 +270,7 @@ func TestStreamingChatCompletions(t *testing.T) {
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
 
-	h := New(cfg, pool, nil, log)
+	h := New(cfg, nil, pool, nil, log)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -320,7 +320,7 @@ func TestStreamErrorRelay(t *testing.T) {
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
 
-	h := New(cfg, pool, nil, log)
+	h := New(cfg, nil, pool, nil, log)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -413,7 +413,7 @@ func TestRateLimitedReturns429(t *testing.T) {
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
 
-	h := New(cfg, pool, nil, log)
+	h := New(cfg, nil, pool, nil, log)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -473,7 +473,7 @@ func TestPublicTierRateLimitShortCircuits(t *testing.T) {
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
 
-	h := New(cfg, pool, nil, log)
+	h := New(cfg, nil, pool, nil, log)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -541,7 +541,7 @@ func TestZenLiveModels(t *testing.T) {
 			pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 			pool.Start(context.Background())
 
-			h := New(cfg, pool, nil, log)
+	h := New(cfg, nil, pool, nil, log)
 			srv := httptest.NewServer(h)
 			defer srv.Close()
 
@@ -607,7 +607,7 @@ func TestOpenCodeModeRelay(t *testing.T) {
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
 
-	h := New(cfg, pool, nil, log)
+	h := New(cfg, nil, pool, nil, log)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -682,7 +682,7 @@ func newTestGateway(t testing.TB, upstreamURL string, cfgMut ...func(*config.Con
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
 
-	return New(cfg, pool, nil, log)
+	return New(cfg, nil, pool, nil, log)
 }
 
 // openAIErrorBody parses the standard {"error": {...}} envelope.

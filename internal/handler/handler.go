@@ -26,6 +26,7 @@ import (
 // Handler handles HTTP requests for the OpenAI-compatible API
 type Handler struct {
 	cfg        *config.Config
+	cfgStore   *config.ConfigStore
 	pool       *proxy.PoolManager
 	client     upstream.Upstream
 	metrics    *metrics.Store
@@ -50,8 +51,8 @@ type Handler struct {
 }
 
 // New creates a new HTTP handler
-func New(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Store, log *zerolog.Logger) http.Handler {
-	h := newHandler(cfg, pool, metricsStore, log)
+func New(cfg *config.Config, cfgStore *config.ConfigStore, pool *proxy.PoolManager, metricsStore *metrics.Store, log *zerolog.Logger) http.Handler {
+	h := newHandler(cfg, cfgStore, pool, metricsStore, log)
 	return h.loggingMiddleware(h.requestIDMiddleware(h.corsMiddleware(h.gatewayAuthMiddleware(h.mux))))
 }
 
@@ -60,7 +61,7 @@ func (h *Handler) PowService() *PoWService { return h.pow }
 
 // newHandler builds the handler with all routes registered but without
 // middleware wrapping. Split from New so tests can inspect internals.
-func newHandler(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metrics.Store, log *zerolog.Logger) *Handler {
+func newHandler(cfg *config.Config, cfgStore *config.ConfigStore, pool *proxy.PoolManager, metricsStore *metrics.Store, log *zerolog.Logger) *Handler {
 	var client upstream.Upstream
 	driver := cfg.UpstreamProvider
 	switch driver {
@@ -83,6 +84,7 @@ func newHandler(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metri
 
 	h := &Handler{
 		cfg:        cfg,
+		cfgStore:   cfgStore,
 		pool:       pool,
 		client:     client,
 		metrics:    metricsStore,
@@ -115,6 +117,20 @@ func newHandler(cfg *config.Config, pool *proxy.PoolManager, metricsStore *metri
 	h.mux.HandleFunc("GET /stats", h.handleStats)
 	h.mux.HandleFunc("GET /api/metrics", h.handleMetrics)
 	h.mux.HandleFunc("GET /metrics", prometheus.Handler())
+
+	// Management API (CRUD for accounts, proxies, settings)
+	if cfgStore != nil {
+		h.mux.HandleFunc("GET /api/manage/accounts", h.handleListAccounts)
+		h.mux.HandleFunc("POST /api/manage/accounts", h.handleCreateAccount)
+		h.mux.HandleFunc("PUT /api/manage/accounts/{id}", h.handleUpdateAccount)
+		h.mux.HandleFunc("DELETE /api/manage/accounts/{id}", h.handleDeleteAccount)
+		h.mux.HandleFunc("GET /api/manage/proxies", h.handleListProxies)
+		h.mux.HandleFunc("POST /api/manage/proxies", h.handleCreateProxy)
+		h.mux.HandleFunc("DELETE /api/manage/proxies/{id}", h.handleDeleteProxy)
+		h.mux.HandleFunc("GET /api/manage/settings", h.handleGetSettings)
+		h.mux.HandleFunc("PUT /api/manage/settings", h.handleUpdateSettings)
+		h.mux.HandleFunc("GET /api/manage/pool", h.handleGetPool)
+	}
 
 	// JSON fallback for unknown /v1/* paths and wrong methods — Go's ServeMux
 	// would otherwise answer with a plain-text 404/405, which breaks OpenAI

@@ -13,6 +13,8 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const maxHTTPBodySize = 10 << 20 // 10 MB
+
 // SRPAuth handles ProtonVPN SRP authentication
 type SRPAuth struct {
 	username   string
@@ -27,10 +29,24 @@ func commonHeaders(req *http.Request, uid string) {
 	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
 	req.Header.Set("x-pm-appversion", "web-vpn-settings@5.0.353.0")
 	req.Header.Set("x-pm-locale", "en_US")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 	if uid != "" {
 		req.Header.Set("x-pm-uid", uid)
 	}
+}
+
+// readBody reads an HTTP response body with a size limit to prevent OOM.
+func readBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	limited := io.LimitReader(resp.Body, maxHTTPBodySize+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxHTTPBodySize {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxHTTPBodySize)
+	}
+	return body, nil
 }
 
 // NewSRPAuth creates a new SRP authenticator
@@ -152,9 +168,8 @@ func (a *SRPAuth) getSession() (*SessionResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -197,9 +212,8 @@ func (a *SRPAuth) getAuthInfo(uid string, cookies []*http.Cookie, intent string)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -244,9 +258,8 @@ func (a *SRPAuth) authenticate(srpsession string, clientProof, clientEphemeral [
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -294,7 +307,7 @@ func (a *SRPAuth) getCookies(accessToken, refreshToken, uid string) ([]*http.Coo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodySize))
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -316,9 +329,8 @@ func (a *SRPAuth) getUserInfo(uid string, cookies []*http.Cookie) (*UserResponse
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -350,9 +362,8 @@ func (a *SRPAuth) getKeySalts(uid string, cookies []*http.Cookie) (*KeySaltsResp
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}

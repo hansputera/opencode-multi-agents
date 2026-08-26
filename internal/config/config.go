@@ -58,6 +58,11 @@ type Config struct {
 	// Values <= 1 disable extra rotation.
 	ProxyIPRotateAttempts int `yaml:"proxy_ip_rotate_attempts" env:"PROXY_IP_ROTATE_ATTEMPTS"`
 
+	// ProxySOCKS5Addrs is a comma-separated list of external SOCKS5 proxy
+	// addresses that coexist with ProtonVPN containers in the same pool.
+	// Format: "socks5://host:port,socks5://user:pass@host:port"
+	ProxySOCKS5Addrs string `yaml:"proxy_socks5_addrs" env:"PROXY_SOCKS5_ADDRS"`
+
 	// --- PoW-gated API keys ---
 	//
 	// When PowEnabled, /v1/* requires a valid API key: either one from
@@ -88,13 +93,18 @@ type Config struct {
 	ResourceMemoryLimit string        `yaml:"resource_memory_limit" env:"RESOURCE_MEMORY_LIMIT"`
 
 	// ProtonVPN configuration
-	ProtonVPNUsername   string `yaml:"protonvpn_username" env:"PROTONVPN_USERNAME"`
-	ProtonVPNPassword   string `yaml:"protonvpn_password" env:"PROTONVPN_PASSWORD"`
-	ProtonVPNAPIBase    string `yaml:"protonvpn_api_base" env:"PROTONVPN_API_BASE"`
-	ProtonVPNVpnAPIBase string `yaml:"protonvpn_vpn_api_base" env:"PROTONVPN_VPN_API_BASE"`
-	ProtonVPNStorePath  string `yaml:"protonvpn_store_path" env:"PROTONVPN_STORE_PATH"`
-	ProtonVPNRegions    string `yaml:"protonvpn_regions" env:"PROTONVPN_REGIONS"`
-	ProtonVPNIPCheckURL string `yaml:"protonvpn_ip_check_url" env:"PROTONVPN_IP_CHECK_URL"`
+	ProtonVPNUsername       string `yaml:"protonvpn_username" env:"PROTONVPN_USERNAME"`
+	ProtonVPNPassword       string `yaml:"protonvpn_password" env:"PROTONVPN_PASSWORD"`
+	ProtonVPNAPIBase        string `yaml:"protonvpn_api_base" env:"PROTONVPN_API_BASE"`
+	ProtonVPNVpnAPIBase     string `yaml:"protonvpn_vpn_api_base" env:"PROTONVPN_VPN_API_BASE"`
+	ProtonVPNStorePath      string `yaml:"protonvpn_store_path" env:"PROTONVPN_STORE_PATH"`
+	ProtonVPNRegions        string `yaml:"protonvpn_regions" env:"PROTONVPN_REGIONS"`
+	ProtonVPNIPCheckURL     string `yaml:"protonvpn_ip_check_url" env:"PROTONVPN_IP_CHECK_URL"`
+	ProtonVPNSessionCookies string `yaml:"protonvpn_session_cookies" env:"PROTONVPN_SESSION_COOKIES"`
+	// ProtonVPNAccounts is a comma-separated list of username:password pairs
+	// for multi-account round-robin. When set, PROTONVPN_USERNAME/PASSWORD are
+	// ignored. Format: "user1:pass1,user2:pass2"
+	ProtonVPNAccounts string `yaml:"protonvpn_accounts" env:"PROTONVPN_ACCOUNTS"`
 
 	// Retry configuration
 	MaxRetries     int           `yaml:"max_retries" env:"MAX_RETRIES"`
@@ -473,6 +483,15 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("PROTONVPN_IP_CHECK_URL"); v != "" {
 		c.ProtonVPNIPCheckURL = v
 	}
+	if v := os.Getenv("PROTONVPN_SESSION_COOKIES"); v != "" {
+		c.ProtonVPNSessionCookies = v
+	}
+	if v := os.Getenv("PROTONVPN_ACCOUNTS"); v != "" {
+		c.ProtonVPNAccounts = v
+	}
+	if v := os.Getenv("PROXY_SOCKS5_ADDRS"); v != "" {
+		c.ProxySOCKS5Addrs = v
+	}
 	if v := os.Getenv("RATE_LIMIT_COOLDOWN"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			c.CooldownDuration = d
@@ -557,11 +576,13 @@ func (c *Config) Validate() error {
 	if c.ProxyBasePort < 1024 || c.ProxyBasePort > 65535 {
 		return fmt.Errorf("PROXY_BASE_PORT must be between 1024 and 65535")
 	}
-	if c.ProtonVPNUsername == "" {
-		return fmt.Errorf("PROTONVPN_USERNAME is required")
-	}
-	if c.ProtonVPNPassword == "" {
-		return fmt.Errorf("PROTONVPN_PASSWORD is required")
+	if c.ProtonVPNSessionCookies == "" && c.ProtonVPNAccounts == "" {
+		if c.ProtonVPNUsername == "" {
+			return fmt.Errorf("PROTONVPN_USERNAME is required (or set PROTONVPN_SESSION_COOKIES / PROTONVPN_ACCOUNTS)")
+		}
+		if c.ProtonVPNPassword == "" {
+			return fmt.Errorf("PROTONVPN_PASSWORD is required (or set PROTONVPN_SESSION_COOKIES / PROTONVPN_ACCOUNTS)")
+		}
 	}
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("MAX_RETRIES cannot be negative")
@@ -622,4 +643,52 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// ProtonVPNAccount represents a single ProtonVPN account credential.
+type ProtonVPNAccount struct {
+	Username string
+	Password string
+}
+
+// ParseProtonVPNAccounts parses the PROTONVPN_ACCOUNTS env var into a list of
+// credentials. Falls back to PROTONVPN_USERNAME/PASSWORD if accounts is empty.
+func (c *Config) ParseProtonVPNAccounts() []ProtonVPNAccount {
+	if c.ProtonVPNAccounts != "" {
+		var accounts []ProtonVPNAccount
+		for _, pair := range strings.Split(c.ProtonVPNAccounts, ",") {
+			pair = strings.TrimSpace(pair)
+			idx := strings.IndexByte(pair, ':')
+			if idx < 0 {
+				continue
+			}
+			accounts = append(accounts, ProtonVPNAccount{
+				Username: strings.TrimSpace(pair[:idx]),
+				Password: strings.TrimSpace(pair[idx+1:]),
+			})
+		}
+		if len(accounts) > 0 {
+			return accounts
+		}
+	}
+	// Fallback to single account
+	if c.ProtonVPNUsername != "" {
+		return []ProtonVPNAccount{{Username: c.ProtonVPNUsername, Password: c.ProtonVPNPassword}}
+	}
+	return nil
+}
+
+// ParseSOCKS5Addrs parses the PROXY_SOCKS5_ADDRS env var into a list of addresses.
+func (c *Config) ParseSOCKS5Addrs() []string {
+	if c.ProxySOCKS5Addrs == "" {
+		return nil
+	}
+	var addrs []string
+	for _, addr := range strings.Split(c.ProxySOCKS5Addrs, ",") {
+		addr = strings.TrimSpace(addr)
+		if addr != "" {
+			addrs = append(addrs, addr)
+		}
+	}
+	return addrs
 }

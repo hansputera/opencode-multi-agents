@@ -61,6 +61,10 @@ func (s *Store) migrate() error {
 			server_public_key TEXT NOT NULL,
 			server_ip TEXT NOT NULL,
 			vpn_ip TEXT NOT NULL,
+			ipv4 TEXT NOT NULL DEFAULT '',
+			ipv6 TEXT NOT NULL DEFAULT '',
+			dns TEXT NOT NULL DEFAULT '[]',
+			refresh_time INTEGER NOT NULL DEFAULT 0,
 			expires_at DATETIME NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -86,6 +90,17 @@ func (s *Store) migrate() error {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("failed to execute migration: %w", err)
 		}
+	}
+
+	// V2 migrations: add columns that may not exist from v1
+	v2Migrations := []string{
+		`ALTER TABLE certificates ADD COLUMN ipv4 TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE certificates ADD COLUMN ipv6 TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE certificates ADD COLUMN dns TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE certificates ADD COLUMN refresh_time INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, q := range v2Migrations {
+		s.db.Exec(q) // ignore "duplicate column" errors
 	}
 
 	return nil
@@ -168,17 +183,25 @@ func (s *Store) SetSession(session *Session) error {
 func (s *Store) GetCertificate() (*CertificateResponse, error) {
 	var cert CertificateResponse
 	var expiresAt time.Time
+	var dnsJSON string
 
 	err := s.db.QueryRow(
-		"SELECT certificate, client_key, server_public_key, server_ip, vpn_ip, expires_at FROM certificates WHERE expires_at > ? ORDER BY id DESC LIMIT 1",
+		`SELECT certificate, client_key, server_public_key, server_ip, vpn_ip,
+		        ipv4, ipv6, dns, refresh_time, expires_at
+		 FROM certificates WHERE expires_at > ? ORDER BY id DESC LIMIT 1`,
 		time.Now(),
 	).Scan(&cert.Certificate, &cert.ClientKey, &cert.ServerPublicKey,
-		&cert.Features.PeerIP, &cert.Features.PeerIP, &expiresAt)
+		&cert.Features.PeerIP, &cert.Features.PeerPublicKey,
+		&cert.IPv4, &cert.IPv6, &dnsJSON, &cert.RefreshTime, &expiresAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("no valid certificate stored")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get certificate: %w", err)
+	}
+
+	if dnsJSON != "" {
+		json.Unmarshal([]byte(dnsJSON), &cert.DNS)
 	}
 
 	cert.ExpirationTime = expiresAt.Unix()
@@ -187,10 +210,16 @@ func (s *Store) GetCertificate() (*CertificateResponse, error) {
 
 // SetCertificate stores a certificate
 func (s *Store) SetCertificate(cert *CertificateResponse) error {
+	dnsJSON, _ := json.Marshal(cert.DNS)
+
 	_, err := s.db.Exec(
-		"INSERT INTO certificates (certificate, client_key, server_public_key, server_ip, vpn_ip, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+		`INSERT INTO certificates
+		 (certificate, client_key, server_public_key, server_ip, vpn_ip,
+		  ipv4, ipv6, dns, refresh_time, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		cert.Certificate, cert.ClientKey, cert.ServerPublicKey,
-		cert.Features.PeerIP, cert.Features.PeerIP,
+		cert.Features.PeerIP, cert.Features.PeerPublicKey,
+		cert.IPv4, cert.IPv6, string(dnsJSON), cert.RefreshTime,
 		time.Unix(cert.ExpirationTime, 0),
 	)
 	if err != nil {

@@ -42,7 +42,7 @@ func retryHarness(t *testing.T, failures int32) (srvURL string, calls *int32) {
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
 
-	srv := httptest.NewServer(New(cfg, pool, nil, log))
+	srv := httptest.NewServer(New(cfg, nil, pool, nil, log))
 	t.Cleanup(srv.Close)
 	return srv.URL, calls
 }
@@ -127,7 +127,7 @@ func TestModelsRetriesTransientUpstream5xx(t *testing.T) {
 	}}
 	pool := proxy.NewPoolManagerWithManager(mgr, cfg, log)
 	pool.Start(context.Background())
-	srv := httptest.NewServer(New(cfg, pool, nil, log))
+	srv := httptest.NewServer(New(cfg, nil, pool, nil, log))
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/v1/models")

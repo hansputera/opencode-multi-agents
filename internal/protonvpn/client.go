@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -19,14 +18,15 @@ import (
 
 // Client handles ProtonVPN API operations
 type Client struct {
-	store      *Store
-	auth       *SRPAuth
-	vpnAPIBase string
-	httpClient *http.Client
-	log        *zerolog.Logger
-	username   string
-	password   string
-	certMu     sync.Mutex // Serializes certificate creation to avoid key conflicts
+	store            *Store
+	auth             *SRPAuth
+	vpnAPIBase       string
+	httpClient       *http.Client
+	log              *zerolog.Logger
+	username         string
+	password         string
+	certMu           sync.Mutex // Serializes certificate creation to avoid key conflicts
+	sessionCookiesRaw string    // raw cookie string for re-import on expiry
 }
 
 // NewClient creates a new ProtonVPN client
@@ -44,17 +44,91 @@ func NewClient(store *Store, apiBase, vpnAPIBase, username, password string, log
 	}
 }
 
-// Login authenticates and stores credentials
-func (c *Client) Login(username, password string) error {
-	// Store credentials
-	if err := c.store.SetCredentials(username, password); err != nil {
-		return fmt.Errorf("failed to store credentials: %w", err)
+// SetSessionCookies sets the raw cookie string for imported browser sessions.
+// Must be called before EnsureSession so the client knows to re-import on
+// expiry instead of falling back to SRP login.
+func (c *Client) SetSessionCookies(cookieStr string) {
+	c.sessionCookiesRaw = cookieStr
+}
+
+// ParseCookieString parses a browser cookie string (e.g. "name=value; name2=value2")
+// into []*http.Cookie. It strips cookie attributes (Domain, Path, etc.) and only
+// keeps name=value pairs.
+func ParseCookieString(cookieStr string) []*http.Cookie {
+	var cookies []*http.Cookie
+	for _, part := range strings.Split(cookieStr, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// Split on first '=' only — value may contain '='
+		idx := strings.IndexByte(part, '=')
+		if idx < 0 {
+			continue
+		}
+		name := strings.TrimSpace(part[:idx])
+		value := strings.TrimSpace(part[idx+1:])
+		if name == "" {
+			continue
+		}
+		cookies = append(cookies, &http.Cookie{
+			Name:  name,
+			Value: value,
+		})
+	}
+	return cookies
+}
+
+// ImportBrowserCookies imports cookies from a browser cookie string and stores
+// them as the active session. This bypasses SRP authentication entirely.
+// The UID must be extracted from the Session-Id cookie or provided separately.
+func (c *Client) ImportBrowserCookies(cookieStr string) error {
+	cookies := ParseCookieString(cookieStr)
+	if len(cookies) == 0 {
+		return fmt.Errorf("no valid cookies found in string")
 	}
 
-	// Perform SRP authentication
+	// Extract UID from cookies — ProtonVPN stores it in the Session-Id cookie
+	var uid string
+	for _, ck := range cookies {
+		if ck.Name == "Session-Id" {
+			uid = ck.Value
+			break
+		}
+	}
+	if uid == "" {
+		return fmt.Errorf("Session-Id cookie not found — cannot determine UID")
+	}
+
+	// Store as a session with a far-future expiry (browser cookies are
+	// refreshed client-side; we treat them as valid until they fail)
+	session := &Session{
+		UID:       uid,
+		UserID:    uid, // best-effort; not critical for API calls
+		Cookies:   cookies,
+		ExpiresAt: time.Now().Add(24 * time.Hour), // re-check daily
+	}
+
+	if err := c.store.SetSession(session); err != nil {
+		return fmt.Errorf("failed to store imported session: %w", err)
+	}
+
+	c.sessionCookiesRaw = cookieStr
+	c.log.Info().Int("cookies", len(cookies)).Str("uid", uid).Msg("Imported browser cookies for ProtonVPN")
+	return nil
+}
+
+// Login authenticates and stores credentials
+func (c *Client) Login(username, password string) error {
+	// Perform SRP authentication first
 	session, err := c.auth.Login()
 	if err != nil {
 		return fmt.Errorf("login failed: %w", err)
+	}
+
+	// Only store credentials after successful auth
+	if err := c.store.SetCredentials(username, password); err != nil {
+		return fmt.Errorf("failed to store credentials: %w", err)
 	}
 
 	// Store session
@@ -184,11 +258,7 @@ func (c *Client) requestCertificate(session *Session, clientPublicKeyB64, server
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
-	req.Header.Set("x-pm-appversion", "web-vpn-settings@5.0.353.0")
-	req.Header.Set("x-pm-locale", "en_US")
-	req.Header.Set("x-pm-uid", session.UID)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+	commonHeaders(req, session.UID)
 	for _, cookie := range session.Cookies {
 		req.AddCookie(cookie)
 	}
@@ -197,9 +267,8 @@ func (c *Client) requestCertificate(session *Session, clientPublicKeyB64, server
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -229,7 +298,12 @@ func (c *Client) FetchServerList() (*ServerListResponse, error) {
 		return cached, nil
 	}
 
-	// Ensure session
+	// Ensure we have a valid session
+	if err := c.EnsureSession(); err != nil {
+		return nil, fmt.Errorf("failed to ensure session: %w", err)
+	}
+
+	// Get session
 	session, err := c.store.GetSession()
 	if err != nil {
 		return nil, fmt.Errorf("no session: %w", err)
@@ -242,11 +316,7 @@ func (c *Client) FetchServerList() (*ServerListResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("Accept", "application/vnd.protonmail.v1+json")
-	req.Header.Set("x-pm-appversion", "web-vpn-settings@5.0.353.0")
-	req.Header.Set("x-pm-locale", "en_US")
-	req.Header.Set("x-pm-uid", session.UID)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+	commonHeaders(req, session.UID)
 	for _, c := range session.Cookies {
 		req.AddCookie(c)
 	}
@@ -255,9 +325,8 @@ func (c *Client) FetchServerList() (*ServerListResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -385,11 +454,11 @@ func (c *Client) SelectServer(region string, bannedRegions, avoidServers map[str
 
 	// Select based on score and load
 	best := candidates[0]
-	for _, c := range candidates[1:] {
+	for _, cand := range candidates[1:] {
 		// Prefer higher score, lower load
-		if c.logical.Score > best.logical.Score ||
-			(c.logical.Score == best.logical.Score && c.logical.Load < best.logical.Load) {
-			best = c
+		if cand.logical.Score > best.logical.Score ||
+			(cand.logical.Score == best.logical.Score && cand.logical.Load < best.logical.Load) {
+			best = cand
 		}
 	}
 
@@ -444,33 +513,37 @@ func ed25519PrivKeyToCurve25519(edKey ed25519.PrivateKey) ([]byte, error) {
 	return h[:32], nil
 }
 
-// EnsureSession ensures the session is valid, refreshing if needed
+// EnsureSession ensures the session is valid, refreshing if needed.
+// When imported cookies are active, it checks them instead of SRP login.
 func (c *Client) EnsureSession() error {
+	// If we have imported cookies, just verify the session exists
+	if c.sessionCookiesRaw != "" {
+		session, err := c.store.GetSession()
+		if err == nil && time.Now().Before(session.ExpiresAt) {
+			return nil
+		}
+		// Session expired or missing — re-import the cookies
+		return c.ImportBrowserCookies(c.sessionCookiesRaw)
+	}
+
 	session, err := c.store.GetSession()
-	if err != nil {
-		// No session, need to login
-		if c.username == "" || c.password == "" {
-			storedUser, storedPass, credErr := c.store.GetCredentials()
-			if credErr != nil {
-				return fmt.Errorf("no credentials stored and no credentials provided")
-			}
-			return c.Login(storedUser, storedPass)
-		}
-		return c.Login(c.username, c.password)
+	if err == nil && time.Now().Add(5*time.Minute).Before(session.ExpiresAt) {
+		return nil // session exists and is not expired
 	}
 
-	// Check if session is expired (with 5 minute buffer)
-	if time.Now().Add(5 * time.Minute).After(session.ExpiresAt) {
-		c.log.Info().Msg("Session expired, refreshing")
-		if c.username == "" || c.password == "" {
-			storedUser, storedPass, err := c.store.GetCredentials()
-			if err != nil {
-				return fmt.Errorf("no credentials stored for refresh and no credentials provided")
-			}
-			return c.Login(storedUser, storedPass)
-		}
+	// Session missing or expired — need to login
+	c.log.Info().Bool("expired", err == nil).Msg("Session invalid, logging in")
+	return c.loginWithCredentials()
+}
+
+// loginWithCredentials attempts login using configured or stored credentials.
+func (c *Client) loginWithCredentials() error {
+	if c.username != "" && c.password != "" {
 		return c.Login(c.username, c.password)
 	}
-
-	return nil
+	storedUser, storedPass, credErr := c.store.GetCredentials()
+	if credErr != nil {
+		return fmt.Errorf("no credentials available: %w", credErr)
+	}
+	return c.Login(storedUser, storedPass)
 }

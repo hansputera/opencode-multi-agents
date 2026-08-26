@@ -613,6 +613,55 @@ func (pm *PoolManager) RemoveProxy(ctx context.Context, proxyID string) error {
 	return nil
 }
 
+// AddExternalProxy adds an external SOCKS5 proxy to the live pool.
+func (pm *PoolManager) AddExternalProxy(ctx context.Context, addr string) (*Proxy, error) {
+	extMgr := NewExternalProxyManager([]string{addr}, pm.cfg.ProtonVPNIPCheckURL, pm.log)
+	p, err := extMgr.CreateEx(ctx, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create external proxy: %w", err)
+	}
+
+	// Health check to get egress IP
+	if ok, err := extMgr.HealthCheck(ctx, p); err != nil || !ok {
+		pm.log.Warn().Err(err).Str("addr", addr).Msg("External proxy health check failed, adding anyway")
+	}
+
+	p.SetManager(extMgr)
+
+	pm.mu.Lock()
+	pm.pool[p.ID] = p
+	pm.mu.Unlock()
+
+	// Signal availability
+	select {
+	case pm.available <- struct{}{}:
+	default:
+	}
+
+	pm.log.Info().Str("id", p.ID).Str("addr", addr).Str("ip", p.EgressIP).Msg("Added external proxy")
+	return p, nil
+}
+
+// RemoveExternalProxy removes an external proxy from the pool by ID.
+func (pm *PoolManager) RemoveExternalProxy(ctx context.Context, proxyID string) error {
+	return pm.RemoveProxy(ctx, proxyID)
+}
+
+// SetPoolSize updates the target pool size at runtime.
+func (pm *PoolManager) SetPoolSize(newSize int) {
+	pm.mu.Lock()
+	pm.cfg.ProxyPoolSize = newSize
+	pm.mu.Unlock()
+
+	pm.log.Info().Int("new_size", newSize).Msg("Pool size updated")
+	pm.ensurePoolCapacity(context.Background())
+}
+
+// AddVPNContainer spawns a new VPN container and adds it to the pool.
+func (pm *PoolManager) AddVPNContainer(ctx context.Context) error {
+	return pm.createProxy(ctx)
+}
+
 // Stats returns current pool statistics
 func (pm *PoolManager) Stats() PoolStats {
 	pm.mu.RLock()

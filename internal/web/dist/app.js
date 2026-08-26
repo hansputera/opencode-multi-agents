@@ -18,6 +18,7 @@ const App = {
     const views = {};
     if (typeof ChatView !== 'undefined') views.chat = ChatView;
     if (typeof GetKeyView !== 'undefined') views.getkey = GetKeyView;
+    if (typeof ManageView !== 'undefined') views.manage = ManageView;
     const view = views[name] || DashboardView;
 
     if (this.current && this.current.destroy) {

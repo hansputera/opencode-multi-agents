@@ -155,7 +155,7 @@ func TestPoWBurstCooldown(t *testing.T) {
 	cfg.PowMinDifficulty = 1
 	cfg.PowBurstRPS = 3
 	cfg.PowBurstCooldown = 5 * time.Minute
-	h = newHandler(cfg, nil, nil, testLogger())
+	h = newHandler(cfg, nil, nil, nil, testLogger())
 
 	// Issue a key through the real flow.
 	srv := httptest.NewServer(h.loggingMiddleware(h.requestIDMiddleware(h.corsMiddleware(h.gatewayAuthMiddleware(h.mux)))))

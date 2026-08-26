@@ -75,17 +75,32 @@ func NewDockerManager(cfg *config.Config, log *zerolog.Logger) (*DockerManager, 
 	// Initialize ProtonVPN client
 	protonClient := protonvpn.NewClient(store, cfg.ProtonVPNAPIBase, cfg.ProtonVPNVpnAPIBase, cfg.ProtonVPNUsername, cfg.ProtonVPNPassword, log)
 
-	// Try to login with provided credentials (will store them in database)
-	if err := protonClient.Login(cfg.ProtonVPNUsername, cfg.ProtonVPNPassword); err != nil {
-		log.Warn().Err(err).Msg("Login failed, trying to use existing session")
-		// If login fails, try to use existing session
-		if err := protonClient.EnsureSession(); err != nil {
-			cli.Close()
-			store.Close()
-			return nil, fmt.Errorf("failed to initialize ProtonVPN session: %w", err)
+	// Tell the client about cookie mode before EnsureSession so it can
+	// re-import on expiry instead of falling back to SRP login
+	if cfg.ProtonVPNSessionCookies != "" {
+		protonClient.SetSessionCookies(cfg.ProtonVPNSessionCookies)
+	}
+
+	// Try to reuse existing session first; only import/login if needed
+	if err := protonClient.EnsureSession(); err != nil {
+		// No valid session — import cookies or SRP login
+		if cfg.ProtonVPNSessionCookies != "" {
+			if err := protonClient.ImportBrowserCookies(cfg.ProtonVPNSessionCookies); err != nil {
+				cli.Close()
+				store.Close()
+				return nil, fmt.Errorf("failed to import browser cookies: %w", err)
+			}
+			log.Info().Msg("Imported browser cookies for ProtonVPN")
+		} else {
+			if err := protonClient.Login(cfg.ProtonVPNUsername, cfg.ProtonVPNPassword); err != nil {
+				cli.Close()
+				store.Close()
+				return nil, fmt.Errorf("failed to initialize ProtonVPN session: %w", err)
+			}
+			log.Info().Msg("Logged in to ProtonVPN")
 		}
 	} else {
-		log.Info().Msg("Successfully logged in to ProtonVPN")
+		log.Info().Msg("Reused existing ProtonVPN session")
 	}
 
 	dm := &DockerManager{
