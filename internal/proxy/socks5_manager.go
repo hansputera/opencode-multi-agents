@@ -70,7 +70,8 @@ func (m *ExternalProxyManager) Remove(_ context.Context, _ string) error {
 // HealthCheck probes the external SOCKS5 proxy by dialing through it to the
 // IP check endpoint, then records the egress IP.
 func (m *ExternalProxyManager) HealthCheck(ctx context.Context, p *Proxy) (bool, error) {
-	raw := strings.TrimPrefix(p.SOCKS5Addr, "socks5://")
+	raw := strings.TrimPrefix(p.SOCKS5Addr, "socks5h://")
+	raw = strings.TrimPrefix(raw, "socks5://")
 
 	// Parse user:pass@host:port format
 	var auth *proxy.Auth

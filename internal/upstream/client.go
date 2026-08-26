@@ -225,7 +225,8 @@ func (c *Client) getClient(p *proxypkg.Proxy) (*http.Client, error) {
 // address. Shared by the Zen client and the OpenCode client so every upstream
 // request is egressed through the assigned proxy container's VPN IP.
 func NewSOCKS5Dialer(socks5Addr string) (proxy.Dialer, error) {
-	addr := strings.TrimPrefix(socks5Addr, "socks5://")
+	addr := strings.TrimPrefix(socks5Addr, "socks5h://")
+	addr = strings.TrimPrefix(addr, "socks5://")
 	dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)

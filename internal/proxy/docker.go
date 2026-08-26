@@ -449,7 +449,8 @@ func (dm *DockerManager) Remove(ctx context.Context, containerID string) error {
 func (dm *DockerManager) HealthCheck(ctx context.Context, p *Proxy) (bool, error) {
 	// Dial through the container's SOCKS5 proxy so the trace reflects
 	// the VPN container's egress, not the gateway host's.
-	addr := strings.TrimPrefix(p.SOCKS5Addr, "socks5://")
+	addr := strings.TrimPrefix(p.SOCKS5Addr, "socks5h://")
+	addr = strings.TrimPrefix(addr, "socks5://")
 	dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
 	if err != nil {
 		return false, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
