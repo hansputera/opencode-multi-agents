@@ -137,7 +137,13 @@ func newHandler(cfg *config.Config, cfgStore *config.ConfigStore, pool *proxy.Po
 	// SDK clients that expect the standard JSON error envelope.
 	h.mux.HandleFunc("/v1/", h.handleV1Fallback)
 
-	// Serve the web UI
+	// SPA routes: serve index.html server-side for path-based client routing.
+	// /manage is handled explicitly here so it always gets a full HTML page
+	// on direct navigation (no SPA interception for this SSR-rendered view).
+	h.mux.HandleFunc("/manage", h.handleSPA)
+	h.mux.HandleFunc("/manage/", h.handleSPA)
+
+	// Serve the web UI (catch-all for other SPA routes)
 	h.mux.Handle("/", web.Handler())
 
 	return h
@@ -160,6 +166,15 @@ func (h *Handler) handleV1Fallback(w http.ResponseWriter, r *http.Request) {
 	h.writeOpenAIError(w, http.StatusNotFound,
 		fmt.Sprintf("Invalid URL (%s %s)", r.Method, path),
 		"", "unknown_url")
+}
+
+// handleSPA serves index.html for explicit SPA routes (/manage).
+// This ensures SSR-managed pages always get a full HTML document on direct
+// navigation, bypassing the SPA intercept in app.js.
+func (h *Handler) handleSPA(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(web.IndexHTML())
 }
 
 // keyIdentity describes a resolved API key.

@@ -10,6 +10,13 @@ import (
 //go:embed all:dist
 var dist embed.FS
 
+// IndexHTML returns the embedded index.html content for SSR routes.
+func IndexHTML() []byte {
+	sub, _ := fs.Sub(dist, "dist")
+	data, _ := fs.ReadFile(sub, "index.html")
+	return data
+}
+
 // Handler returns an http.Handler serving the embedded web UI.
 // Static assets are served with Cache-Control: no-cache so browsers
 // revalidate (304) instead of heuristically caching stale JS/CSS after

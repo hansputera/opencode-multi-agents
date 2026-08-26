@@ -5,11 +5,14 @@ const App = {
   init() {
     window.addEventListener('popstate', () => this.route());
     // Intercept same-origin link clicks for SPA navigation
+    // Links with data-no-spa or pointing to /manage* do a full page reload.
     document.addEventListener('click', (e) => {
       const a = e.target.closest('a[href]');
       if (!a) return;
+      if (a.hasAttribute('data-no-spa')) return;
       const url = new URL(a.href, location.origin);
       if (url.origin !== location.origin) return; // external link
+      if (url.pathname.startsWith('/manage')) return; // SSR page, full reload
       e.preventDefault();
       if (url.pathname + url.search !== location.pathname + location.search) {
         history.pushState(null, '', url.pathname + url.search);
@@ -24,6 +27,12 @@ const App = {
     if (!path || path === '/') {
       path = '/dashboard';
       history.replaceState(null, '', path);
+    }
+    // /manage is SSR-only — force full page reload if reached via SPA navigation
+    // (back/forward, pushState, etc.)
+    if (path.startsWith('/manage')) {
+      location.replace('/manage');
+      return;
     }
     const name = path.replace(/^\/?/, '').split('?')[0].split('/')[0] || 'dashboard';
     // Lazy view lookup: tolerate load-order differences between view files.
