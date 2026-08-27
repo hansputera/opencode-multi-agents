@@ -21,12 +21,13 @@ var (
 
 // PoolManager manages a pool of VPN proxy containers
 type PoolManager struct {
-	cfg    *config.Config
-	log    *zerolog.Logger
-	mgr    Manager
-	mu     sync.RWMutex
-	pool   map[string]*Proxy
-	sticky map[string]string // conversation_id -> proxy_id
+	cfg       *config.Config
+	cfgStore  *config.ConfigStore
+	log       *zerolog.Logger
+	mgr       Manager
+	mu        sync.RWMutex
+	pool      map[string]*Proxy
+	sticky    map[string]string // conversation_id -> proxy_id
 
 	// ipBans maps egress IPs to the time until which they are excluded from
 	// selection (upstream rate limited them). Guarded by mu.
@@ -78,9 +79,15 @@ func NewPoolManagerWithManager(mgr Manager, cfg *config.Config, log *zerolog.Log
 		ipBans:      make(map[string]time.Time),
 		regionBans:  make(map[string]time.Time),
 		usedServers: make(map[string]bool),
-		available:   make(chan struct{}, cfg.ProxyPoolSize),
+		available:   make(chan struct{}, 1),
 		done:        make(chan struct{}),
 	}
+}
+
+// SetConfigStore sets the ConfigStore for dynamic account/proxy loading.
+// Must be called before Start() to enable loading accounts from the database.
+func (pm *PoolManager) SetConfigStore(cfgStore *config.ConfigStore) {
+	pm.cfgStore = cfgStore
 }
 
 // Start initializes the proxy pool with the configured number of proxies

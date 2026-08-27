@@ -29,8 +29,20 @@ func main() {
 	log := logger.New(cfg.LogLevel, cfg.LogFormat)
 	log.Info().Msg("Starting OpenAI-compatible API gateway")
 
+	// Initialize config store (runtime accounts, proxies, settings)
+	cfgStore, err := config.NewConfigStore("data/config.db")
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to initialize config store")
+	}
+	defer cfgStore.Close()
+
+	// One-time migration from .env on first boot
+	if err := cfgStore.SeedFromConfig(cfg); err != nil {
+		log.Warn().Err(err).Msg("Failed to seed config from .env")
+	}
+
 	// Build proxy manager(s): external SOCKS5 + multi-account ProtonVPN
-	mgr, cleanupMgr, err := buildManager(cfg, &log.Logger)
+	mgr, cleanupMgr, err := buildManager(cfg, cfgStore, &log.Logger)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize proxy manager")
 	}
@@ -77,18 +89,6 @@ func main() {
 		}
 	}()
 
-	// Initialize config store (runtime accounts, proxies, settings)
-	cfgStore, err := config.NewConfigStore("data/config.db")
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to initialize config store")
-	}
-	defer cfgStore.Close()
-
-	// One-time migration from .env on first boot
-	if err := cfgStore.SeedFromConfig(cfg); err != nil {
-		log.Warn().Err(err).Msg("Failed to seed config from .env")
-	}
-
 	// Create HTTP handler
 	h := handler.New(cfg, cfgStore, poolMgr, metricsStore, &log.Logger)
 
@@ -132,9 +132,52 @@ func main() {
 //   - Multiple sources → CompositeManager wrapping all
 //
 // The cleanup function closes all managers.
-func buildManager(cfg *config.Config, log *zerolog.Logger) (proxy.Manager, func(), error) {
+func buildManager(cfg *config.Config, cfgStore *config.ConfigStore, log *zerolog.Logger) (proxy.Manager, func(), error) {
 	accounts := cfg.ParseProtonVPNAccounts()
 	socks5Addrs := cfg.ParseSOCKS5Addrs()
+
+	// Also load accounts from ConfigStore (added via UI)
+	if cfgStore != nil {
+		storeAccounts, err := cfgStore.GetAccounts()
+		if err == nil {
+			for _, acct := range storeAccounts {
+				if acct.Enabled {
+					// Check if already in list
+					found := false
+					for _, existing := range accounts {
+						if existing.Username == acct.Username {
+							found = true
+							break
+						}
+					}
+					if !found {
+						accounts = append(accounts, config.ProtonVPNAccount{
+							Username: acct.Username,
+							Password: acct.Password,
+						})
+					}
+				}
+			}
+		}
+		// Also load proxies from ConfigStore
+		proxyCfgs, err := cfgStore.GetProxies()
+		if err == nil {
+			for _, p := range proxyCfgs {
+				if p.Enabled {
+					found := false
+					for _, existing := range socks5Addrs {
+						if existing == p.Address {
+							found = true
+							break
+						}
+					}
+					if !found {
+						socks5Addrs = append(socks5Addrs, p.Address)
+					}
+				}
+			}
+		}
+	}
 
 	// Build VPN managers (one per account)
 	var vpnMgrs []proxy.Manager
