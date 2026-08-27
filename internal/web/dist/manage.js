@@ -503,6 +503,19 @@ const ManageView = {
     this.renderPool();
   },
 
+  async rotatePool() {
+    const btn = document.getElementById('btn-rotate-pool');
+    if (btn) { btn.textContent = '⟳ ROTATING…'; btn.disabled = true; }
+    try {
+      const res = await api('/api/manage/pool/rotate', { method: 'POST' });
+      this.pool = res;
+      if (res.new_proxy) {
+        alert('New proxy created: ' + res.new_proxy.id + '\nSOCKS5: ' + (res.new_proxy.socks5_addr || 'pending'));
+      }
+    } catch (e) { alert('Rotation failed: ' + e.message); }
+    this.renderPool();
+  },
+
   renderPool() {
     const el = document.getElementById('manage-content');
     if (!this.pool) {
@@ -546,6 +559,7 @@ const ManageView = {
           <span class="neo-badge bg-orange">Cooldown: ${stats.cooldown || 0}</span>
           <span class="neo-badge bg-red text-white">Unhealthy: ${stats.unhealthy || 0}</span>
           <button onclick="ManageView.refreshPool()" class="neo-btn-industrial sm muted" id="btn-refresh-pool">↻ REFRESH</button>
+          <button onclick="ManageView.rotatePool()" class="neo-btn-industrial sm muted" id="btn-rotate-pool">⟳ ROTATE</button>
         </div>
       </div>
       <div style="overflow-x:auto">

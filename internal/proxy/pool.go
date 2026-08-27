@@ -691,6 +691,63 @@ func (pm *PoolManager) RefreshPool(ctx context.Context, proxies []string) []stri
 	return failed
 }
 
+// ForceRotate creates a new VPN container immediately, rotating one existing
+// proxy if needed to make room. Returns the new proxy or an error.
+func (pm *PoolManager) ForceRotate(ctx context.Context) (*Proxy, error) {
+	if pm.mgr == nil {
+		return nil, fmt.Errorf("no VPN manager available")
+	}
+
+	// If at capacity, remove the oldest idle proxy to make room
+	pm.mu.Lock()
+	if len(pm.pool) >= pm.cfg.ProxyPoolSize {
+		// Find an idle proxy to remove
+		for id, pr := range pm.pool {
+			if pr.State == StateIdle {
+				delete(pm.pool, id)
+				if pr.ContainerID != "" {
+					go func() {
+						rCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if err := pm.mgr.Remove(rCtx, pr.ContainerID); err != nil {
+							pm.log.Warn().Err(err).Str("id", pr.ID).Msg("Failed to remove old proxy during rotation")
+						}
+					}()
+				}
+				break
+			}
+		}
+	}
+	pm.mu.Unlock()
+
+	// Create new proxy
+	if err := pm.createProxy(ctx); err != nil {
+		return nil, fmt.Errorf("failed to create new proxy: %w", err)
+	}
+
+	// Return the most recently added proxy
+	pm.mu.RLock()
+	var newest *Proxy
+	for _, pr := range pm.pool {
+		if newest == nil || pr.CreatedAt.After(newest.CreatedAt) {
+			newest = pr
+		}
+	}
+	pm.mu.RUnlock()
+
+	if newest == nil {
+		return nil, fmt.Errorf("proxy created but not found in pool")
+	}
+
+	pm.log.Info().
+		Str("id", newest.ID).
+		Str("socks5", newest.SOCKS5Addr).
+		Str("region", newest.Region).
+		Msg("Force rotated VPN container")
+
+	return newest, nil
+}
+
 // Stats returns current pool statistics
 func (pm *PoolManager) Stats() PoolStats {
 	pm.mu.RLock()

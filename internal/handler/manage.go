@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hansputera/opencode-multi-agents/internal/config"
+	"github.com/hansputera/opencode-multi-agents/internal/protonvpn"
 )
 
 // --- Accounts ---
@@ -49,6 +50,12 @@ func (h *Handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		enabled = *req.Enabled
 	}
 
+	// Validate credentials before saving
+	if err := h.validateProtonVPNAccount(req.Username, req.Password, req.SessionCookies); err != nil {
+		h.writeErrorParam(w, http.StatusBadRequest, fmt.Sprintf("account validation failed: %v", err), "credentials")
+		return
+	}
+
 	// Generate store path based on next ID
 	accounts, _ := h.cfgStore.GetAccounts()
 	storePath := fmt.Sprintf("data/protonvpn_%d.db", len(accounts)+1)
@@ -73,6 +80,37 @@ func (h *Handler) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusCreated, acct)
+}
+
+// validateProtonVPNAccount tests the credentials by attempting to authenticate.
+func (h *Handler) validateProtonVPNAccount(username, password, sessionCookies string) error {
+	tempDir := fmt.Sprintf("data/temp_validate_%d", time.Now().UnixNano())
+	store, err := protonvpn.NewStore(tempDir)
+	if err != nil {
+		return fmt.Errorf("failed to create temp store: %w", err)
+	}
+
+	client := protonvpn.NewClient(store, h.cfg.ProtonVPNAPIBase, h.cfg.ProtonVPNVpnAPIBase, username, password, h.log)
+
+	if sessionCookies != "" {
+		if err := client.ImportBrowserCookies(sessionCookies); err != nil {
+			return fmt.Errorf("invalid session cookies: %w", err)
+		}
+	} else {
+		if err := client.Login(username, password); err != nil {
+			return fmt.Errorf("invalid credentials: %w", err)
+		}
+	}
+
+	// Test API access by trying to get VPN status
+	if err := client.EnsureSession(); err != nil {
+		return fmt.Errorf("session validation failed: %w", err)
+	}
+
+	// Clean up temp store
+	store.Close()
+
+	return nil
 }
 
 func (h *Handler) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
@@ -373,6 +411,30 @@ func (h *Handler) handleRefreshPool(w http.ResponseWriter, r *http.Request) {
 		"stats":   stats,
 		"proxies": snapshots,
 		"time":    time.Now().Format(time.RFC3339),
+	})
+}
+
+// handleRotatePool forces creation of a new VPN container immediately.
+func (h *Handler) handleRotatePool(w http.ResponseWriter, r *http.Request) {
+	proxy, err := h.pool.ForceRotate(r.Context())
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("rotation failed: %v", err))
+		return
+	}
+
+	stats := h.pool.Stats()
+	proxies := h.pool.List()
+	snapshots := make([]interface{}, len(proxies))
+	for i, p := range proxies {
+		snapshots[i] = p.Snapshot()
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "rotated",
+		"new_proxy": proxy.Snapshot(),
+		"stats":     stats,
+		"proxies":   snapshots,
+		"time":      time.Now().Format(time.RFC3339),
 	})
 }
 

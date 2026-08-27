@@ -131,6 +131,7 @@ func newHandler(cfg *config.Config, cfgStore *config.ConfigStore, pool *proxy.Po
 		h.mux.HandleFunc("PUT /api/manage/settings", h.handleUpdateSettings)
 		h.mux.HandleFunc("GET /api/manage/pool", h.handleGetPool)
 		h.mux.HandleFunc("POST /api/manage/pool/refresh", h.handleRefreshPool)
+		h.mux.HandleFunc("POST /api/manage/pool/rotate", h.handleRotatePool)
 	}
 
 	// JSON fallback for unknown /v1/* paths and wrong methods — Go's ServeMux
