@@ -81,23 +81,23 @@ func ParseCookieString(cookieStr string) []*http.Cookie {
 
 // ImportBrowserCookies imports cookies from a browser cookie string and stores
 // them as the active session. This bypasses SRP authentication entirely.
-// The UID must be extracted from the Session-Id cookie or provided separately.
+// The UID is extracted from the AUTH-{UID} cookie name (ProtonVPN convention).
 func (c *Client) ImportBrowserCookies(cookieStr string) error {
 	cookies := ParseCookieString(cookieStr)
 	if len(cookies) == 0 {
 		return fmt.Errorf("no valid cookies found in string")
 	}
 
-	// Extract UID from cookies — ProtonVPN stores it in the Session-Id cookie
+	// Extract UID from the AUTH-{UID} cookie name
 	var uid string
 	for _, ck := range cookies {
-		if ck.Name == "Session-Id" {
-			uid = ck.Value
+		if strings.HasPrefix(ck.Name, "AUTH-") {
+			uid = strings.TrimPrefix(ck.Name, "AUTH-")
 			break
 		}
 	}
 	if uid == "" {
-		return fmt.Errorf("Session-Id cookie not found — cannot determine UID")
+		return fmt.Errorf("AUTH-{UID} cookie not found — cannot determine UID")
 	}
 
 	// Store as a session with a far-future expiry (browser cookies are
