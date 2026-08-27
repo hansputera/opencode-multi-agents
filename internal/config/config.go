@@ -641,8 +641,9 @@ func (c *Config) Validate() error {
 
 // ProtonVPNAccount represents a single ProtonVPN account credential.
 type ProtonVPNAccount struct {
-	Username string
-	Password string
+	Username       string
+	Password       string
+	SessionCookies string
 }
 
 // ParseProtonVPNAccounts parses the PROTONVPN_ACCOUNTS env var into a list of

@@ -152,8 +152,9 @@ func buildManager(cfg *config.Config, cfgStore *config.ConfigStore, log *zerolog
 					}
 					if !found {
 						accounts = append(accounts, config.ProtonVPNAccount{
-							Username: acct.Username,
-							Password: acct.Password,
+							Username:       acct.Username,
+							Password:       acct.Password,
+							SessionCookies: acct.SessionCookies,
 						})
 					}
 				}
@@ -186,6 +187,7 @@ func buildManager(cfg *config.Config, cfgStore *config.ConfigStore, log *zerolog
 		accountCfg := *cfg // copy
 		accountCfg.ProtonVPNUsername = acct.Username
 		accountCfg.ProtonVPNPassword = acct.Password
+		accountCfg.ProtonVPNSessionCookies = acct.SessionCookies
 		// Isolate store per account (first account uses base path)
 		if i > 0 {
 			accountCfg.ProtonVPNStorePath = fmt.Sprintf("%s_%d", cfg.ProtonVPNStorePath, i)
