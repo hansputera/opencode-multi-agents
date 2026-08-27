@@ -89,6 +89,7 @@ func (h *Handler) validateProtonVPNAccount(username, password, sessionCookies st
 	if err != nil {
 		return fmt.Errorf("failed to create temp store: %w", err)
 	}
+	defer store.Close()
 
 	client := protonvpn.NewClient(store, h.cfg.ProtonVPNAPIBase, h.cfg.ProtonVPNVpnAPIBase, username, password, h.log)
 
@@ -102,13 +103,10 @@ func (h *Handler) validateProtonVPNAccount(username, password, sessionCookies st
 		}
 	}
 
-	// Test API access by trying to get VPN status
-	if err := client.EnsureSession(); err != nil {
-		return fmt.Errorf("session validation failed: %w", err)
+	// Test API access by fetching server list (validates the session works)
+	if _, err := client.FetchServerList(); err != nil {
+		return fmt.Errorf("session validation failed (cannot access API): %w", err)
 	}
-
-	// Clean up temp store
-	store.Close()
 
 	return nil
 }
