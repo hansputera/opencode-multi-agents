@@ -333,6 +333,11 @@ func (c *Client) FetchServerList() (*ServerListResponse, error) {
 
 	c.log.Debug().Int("status", resp.StatusCode).Int("body_len", len(body)).Msg("Server list response")
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		// Clear session so next call triggers re-auth
+		c.store.SetSession(nil)
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
@@ -516,14 +521,29 @@ func ed25519PrivKeyToCurve25519(edKey ed25519.PrivateKey) ([]byte, error) {
 // EnsureSession ensures the session is valid, refreshing if needed.
 // When imported cookies are active, it checks them instead of SRP login.
 func (c *Client) EnsureSession() error {
-	// If we have imported cookies, just verify the session exists
+	// If we have imported cookies, validate them against the API
 	if c.sessionCookiesRaw != "" {
 		session, err := c.store.GetSession()
 		if err == nil && time.Now().Before(session.ExpiresAt) {
-			return nil
+			// Session exists locally — verify it still works with a lightweight API call
+			if err := c.validateSession(session); err == nil {
+				return nil
+			}
+			c.log.Warn().Err(err).Msg("Session cookies expired on server, re-importing")
 		}
-		// Session expired or missing — re-import the cookies
-		return c.ImportBrowserCookies(c.sessionCookiesRaw)
+		// Session expired or invalid — re-import the cookies
+		if err := c.ImportBrowserCookies(c.sessionCookiesRaw); err != nil {
+			return fmt.Errorf("failed to re-import cookies: %w", err)
+		}
+		// Validate the freshly imported cookies
+		session, err = c.store.GetSession()
+		if err != nil {
+			return fmt.Errorf("no session after import: %w", err)
+		}
+		if err := c.validateSession(session); err != nil {
+			return fmt.Errorf("cookies are invalid: %w", err)
+		}
+		return nil
 	}
 
 	session, err := c.store.GetSession()
@@ -534,6 +554,34 @@ func (c *Client) EnsureSession() error {
 	// Session missing or expired — need to login
 	c.log.Info().Bool("expired", err == nil).Msg("Session invalid, logging in")
 	return c.loginWithCredentials()
+}
+
+// validateSession makes a lightweight API call to verify the session is still valid.
+func (c *Client) validateSession(session *Session) error {
+	req, err := http.NewRequest("GET", c.vpnAPIBase+"/api/core/v4/users", nil)
+	if err != nil {
+		return err
+	}
+	commonHeaders(req, session.UID)
+	for _, ck := range session.Cookies {
+		req.AddCookie(ck)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := readBody(resp)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 // loginWithCredentials attempts login using configured or stored credentials.

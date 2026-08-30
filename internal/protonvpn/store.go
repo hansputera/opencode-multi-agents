@@ -164,6 +164,12 @@ func (s *Store) GetSession() (*Session, error) {
 
 // SetSession stores the session
 func (s *Store) SetSession(session *Session) error {
+	if session == nil {
+		// Clear session
+		_, err := s.db.Exec("DELETE FROM session WHERE id = 1")
+		return err
+	}
+
 	cookiesJSON, err := json.Marshal(session.Cookies)
 	if err != nil {
 		return fmt.Errorf("failed to marshal cookies: %w", err)
